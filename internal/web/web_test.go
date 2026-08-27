@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -146,7 +147,7 @@ func TestGenerateAndRender(t *testing.T) {
 		"New bridge approved",
 		"years of debate",
 		`<span id="unread-count">1</span> unread of 1`,
-		"example.com",
+		"https://example.com/bridge",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
@@ -233,6 +234,75 @@ func TestAuthToken(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cookie request = %d, want 200", rec.Code)
+	}
+}
+
+func TestGroupSources(t *testing.T) {
+	got := groupSources([]store.Source{
+		{Feed: "Guardian", URL: "https://g.com/1"},
+		{Feed: "Guardian", URL: "https://g.com/2"},
+		{Feed: "Tagesschau", URL: "https://t.de/1"},
+		{Feed: "Guardian", URL: "https://g.com/3"},
+		{Feed: "Tagesschau", URL: "https://t.de/2"},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("want 2 outlets, got %d: %+v", len(got), got)
+	}
+	// First-seen order, and every article kept.
+	if got[0].Feed != "Guardian" || len(got[0].Articles) != 3 {
+		t.Errorf("group 0 = %+v", got[0])
+	}
+	if got[1].Feed != "Tagesschau" || len(got[1].Articles) != 2 {
+		t.Errorf("group 1 = %+v", got[1])
+	}
+	if got[0].Articles[2].URL != "https://g.com/3" {
+		t.Errorf("article order not preserved: %+v", got[0].Articles)
+	}
+}
+
+// A story pulling several pieces from one outlet renders as one chip, but
+// every article stays reachable inside it — they are different articles.
+func TestManyArticlesFromOneOutletCollapseButStayReachable(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	d, _ := hn.store.LoadDigest(hn.date)
+	d.Topics[0].Sources = nil
+	for i := range 7 {
+		d.Topics[0].Sources = append(d.Topics[0].Sources, store.Source{
+			Feed:  "The Guardian",
+			Title: fmt.Sprintf("Guardian piece %d", i),
+			URL:   fmt.Sprintf("https://g.com/%d", i),
+		})
+	}
+	d.Topics[0].Sources = append(d.Topics[0].Sources,
+		store.Source{Feed: "Tagesschau", Title: "Bericht", URL: "https://t.de/x"})
+	if err := hn.store.SaveDigest(d); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+
+	// One chip per outlet, not one per article.
+	if n := strings.Count(body, `class="src"`); n != 2 {
+		t.Errorf("want 2 outlet chips, got %d", n)
+	}
+	if !strings.Contains(body, `<span class="src-count">7</span>`) {
+		t.Error("count badge missing for the grouped outlet")
+	}
+	// Nothing is dropped: all seven remain, each with its own title.
+	for i := range 7 {
+		if !strings.Contains(body, fmt.Sprintf("https://g.com/%d", i)) {
+			t.Errorf("article %d is unreachable", i)
+		}
+		if !strings.Contains(body, fmt.Sprintf("Guardian piece %d", i)) {
+			t.Errorf("title of article %d missing", i)
+		}
+	}
+	if !strings.Contains(body, "https://t.de/x") {
+		t.Error("the single-article outlet was dropped")
 	}
 }
 

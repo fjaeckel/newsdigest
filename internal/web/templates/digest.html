@@ -16,7 +16,8 @@
   </div>
   <div class="topbar-actions">
     <button type="button" id="toggle-read" class="chip" aria-pressed="false">Hide read</button>
-    <button type="button" id="mark-all" class="chip">Mark all read</button>
+    <button type="button" id="toggle-sources" class="chip" aria-pressed="false">Expand sources</button>
+    <button type="button" id="mark-all" class="chip">Mark all</button>
     <button type="button" id="refresh" class="chip" {{if .Generating}}disabled{{end}}>
       {{if .Generating}}Refreshing…{{else}}Refresh{{end}}
     </button>
@@ -40,10 +41,25 @@
         <h2>{{.Headline}}</h2>
         <p class="summary">{{.Summary}}</p>
       </button>
-      {{if .Sources}}
+      {{with groupSources .Sources}}
       <ul class="sources">
-        {{range .Sources}}
-        <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}<span class="src-host">{{host .URL}}</span></a></li>
+        {{range .}}
+          {{if eq (len .Articles) 1}}
+            {{with index .Articles 0}}
+        <li><a class="src" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}</a></li>
+            {{end}}
+          {{else}}
+        <li class="src-group">
+          <details>
+            <summary class="src">{{.Feed}}<span class="src-count">{{len .Articles}}</span></summary>
+            <ul class="src-list">
+              {{range .Articles}}
+              <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></li>
+              {{end}}
+            </ul>
+          </details>
+        </li>
+          {{end}}
         {{end}}
       </ul>
       {{end}}

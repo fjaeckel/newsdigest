@@ -59,7 +59,7 @@ func New(cfg *config.Config, st *store.Store, gen *digest.Generator, log *slog.L
 			}
 			return t.Format("Mon 2 Jan")
 		},
-		"host": hostOf,
+		"groupSources": groupSources,
 	}
 
 	tpl, err := template.New("").Funcs(funcs).ParseFS(templateFS, "templates/*.html")
@@ -365,17 +365,26 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// hostOf renders a bare hostname for source links.
-func hostOf(rawURL string) string {
-	rest, ok := strings.CutPrefix(rawURL, "https://")
-	if !ok {
-		rest, ok = strings.CutPrefix(rawURL, "http://")
-		if !ok {
-			rest = rawURL
+// GroupedSource gathers the articles one outlet ran on a story. A big story
+// pulls several pieces from the same paper and they're all legitimately
+// different articles, so nothing is discarded: the outlet renders as a single
+// chip that expands to the individual pieces when it holds more than one.
+type GroupedSource struct {
+	Feed     string
+	Articles []store.Source
+}
+
+func groupSources(sources []store.Source) []GroupedSource {
+	var out []GroupedSource
+	seen := map[string]int{} // feed -> index in out, preserving first-seen order
+
+	for _, s := range sources {
+		if i, ok := seen[s.Feed]; ok {
+			out[i].Articles = append(out[i].Articles, s)
+			continue
 		}
+		seen[s.Feed] = len(out)
+		out = append(out, GroupedSource{Feed: s.Feed, Articles: []store.Source{s}})
 	}
-	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
-		rest = rest[:i]
-	}
-	return strings.TrimPrefix(rest, "www.")
+	return out
 }

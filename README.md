@@ -79,8 +79,14 @@ black-on-white by choice and stays that way regardless of your device theme.
 
 - **Tap a topic** to mark it read — it dims, and the unread count drops.
 - **Hide read** collapses what you've already seen. The setting sticks per device.
-- **Mark all read** when you're done for the morning.
+- **Mark all** when you're done for the morning.
 - **‹ ›** move between days; **Archive** lists everything kept.
+
+Sources sit under each topic as one chip per outlet. When an outlet ran several
+pieces on a story they're all kept — the chip carries a count and opens to the
+individual articles by headline. **Expand sources** flips whether those open by
+default; either way you can always tap a chip to dig in. That setting sticks per
+device too.
 
 Read state lives on the server, so marking something read on your phone also
 marks it read on your laptop.

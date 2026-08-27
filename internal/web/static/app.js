@@ -47,7 +47,7 @@
       var read = !allRead;
 
       topics.forEach(function (t) { t.classList.toggle("is-read", read); });
-      markAll.textContent = read ? "Mark all unread" : "Mark all read";
+      markAll.textContent = read ? "Unmark all" : "Mark all";
 
       post("/api/read-all", { date: date, read: read })
         .then(function (res) { setUnread(res.unread); })
@@ -75,6 +75,37 @@
     document.body.classList.toggle("hide-read", on);
     toggle.setAttribute("aria-pressed", on ? "true" : "false");
     toggle.textContent = on ? "Show read" : "Hide read";
+  }
+
+  // --- whether outlets with several articles fan out by default ---
+  // Off keeps the brief dense; either way any outlet can still be opened by
+  // tapping it. Remembered per device.
+
+  var srcToggle = document.getElementById("toggle-sources");
+  if (srcToggle) {
+    var groups = document.querySelectorAll(".src-group details");
+
+    if (!groups.length) {
+      // Nothing to fan out today - don't offer a control that does nothing.
+      srcToggle.remove();
+    } else {
+      var fanned = localStorage.getItem("expandSources") === "1";
+      applySources(fanned);
+
+      srcToggle.addEventListener("click", function () {
+        fanned = !fanned;
+        localStorage.setItem("expandSources", fanned ? "1" : "0");
+        applySources(fanned);
+      });
+    }
+  }
+
+  function applySources(on) {
+    document.querySelectorAll(".src-group details").forEach(function (d) {
+      d.open = on;
+    });
+    srcToggle.setAttribute("aria-pressed", on ? "true" : "false");
+    srcToggle.textContent = on ? "Collapse sources" : "Expand sources";
   }
 
   // --- manual refresh: kick off a run, then poll until it lands ---
