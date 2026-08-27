@@ -1,0 +1,45 @@
+{{define "category.html"}}<!doctype html>
+<html lang="en">
+<head>{{template "head" .}}</head>
+<body class="cat-feed" data-category="{{.Category}}">
+
+<header class="topbar">
+  <div class="topbar-row">
+    <a class="nav-btn" href="/" aria-label="All feeds">‹</a>
+    <div class="topbar-title">
+      <h1>{{.Category}}</h1>
+      <p class="meta"><span id="unread-count">{{.UnreadCount}}</span> unread of {{.Total}}</p>
+    </div>
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+  </div>
+  <div class="topbar-actions">
+    <button type="button" id="toggle-read" class="chip" aria-pressed="false">Hide read</button>
+    <button type="button" id="toggle-sources" class="chip" aria-pressed="false">Expand sources</button>
+    <button type="button" id="mark-category" class="chip">Mark all</button>
+  </div>
+</header>
+
+<main>
+  {{if not .Days}}
+    <p class="notice">Nothing briefed into {{.Category}} yet.</p>
+  {{end}}
+
+  {{range $day := .Days}}
+  <section class="day">
+    <h2 class="day-head"><a href="/d/{{$day.Date}}">{{prettyDate $day.Date}}</a></h2>
+    <ul class="topics">
+      {{range $day.Cards}}{{template "topic-card" .}}{{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{if .Capped}}
+  <p class="notice">Older topics in this feed are in the <a href="/archive">archive</a>.</p>
+  {{end}}
+</main>
+
+{{template "footer-nav" .}}
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

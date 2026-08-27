@@ -111,6 +111,77 @@ main { padding: 12px 16px 24px; max-width: 720px; margin: 0 auto; }
 
 .chip:disabled { opacity: 0.5; cursor: default; }
 
+/* --- home: the standing feeds --- */
+
+.cats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.cat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 15px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cat-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: capitalize;
+}
+
+/* The unread count is the point of the row, so it carries the emphasis. */
+.cat-count {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 999px;
+  min-width: 22px;
+  padding: 2px 7px;
+  text-align: center;
+}
+
+.cat-arrow { color: var(--text-dim); font-size: 20px; line-height: 1; }
+
+/* A feed with nothing waiting recedes rather than disappearing. */
+.cat.is-clear .cat-name { font-weight: 500; color: var(--text-dim); }
+.cat.is-clear .cat-count { color: var(--text-dim); background: var(--accent-soft); }
+
+.alldays { margin: 18px 0 0; font-size: 13px; }
+.alldays a { color: var(--text-dim); text-decoration: none; }
+
+/* --- day headings on a category feed --- */
+
+.day-head {
+  margin: 20px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.day-head:first-child { margin-top: 4px; }
+
+.day-head a { color: inherit; text-decoration: none; }
+
+/* With read topics hidden, a day whose topics have all been read would leave
+   its heading stranded above nothing, so the whole day goes. The day needs to
+   be a wrapper element: :has() may not be nested inside a :not() that is
+   itself inside a :has(), which makes the sibling-combinator form invalid. */
+body.hide-read .day:not(:has(.topic:not(.is-read))) {
+  display: none;
+}
+
 /* --- topics --- */
 
 .topics, .sources, .src-list, .archive, ul.errors { list-style: none; margin: 0; padding: 0; }
@@ -155,6 +226,10 @@ body.hide-read .topic.is-read { display: none; }
   text-transform: uppercase;
   color: var(--text-dim);
 }
+
+/* Inside one category the per-card tag adds little, but it still separates
+   stories within a busy feed, so it stays — only the category name itself is
+   redundant, and that is already the page title. */
 
 .dot {
   margin-left: auto;

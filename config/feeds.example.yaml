@@ -10,17 +10,22 @@ run_at: "08:00"
 # published just before yesterday's run slips through the cracks.
 lookback_hours: 26
 
-# Safety rails so one chatty feed can't dominate the brief or the token bill.
+# Safety rails so one chatty feed can't dominate a brief or the token bill.
+# max_items_total is per category, not per run: each category is briefed on its
+# own, so a loud category can't crowd a quiet one out of its feed.
 max_items_per_feed: 40
 max_items_total: 250
 
-# Upper bound on topics. Claude merges aggressively to stay under it.
+# Upper bound on topics per category, per day. Claude merges aggressively to
+# stay under it. This is a budget each category gets, not one they share.
 max_topics: 12
 
 # Language of the brief, regardless of what language the sources are in.
 language: English
 
 # effort: low | medium | high | xhigh | max — how hard Claude thinks about it.
+# One run costs one Claude call per category that has items that day, so the
+# number of categories below is part of what a morning costs.
 model: claude-opus-5
 effort: medium
 
@@ -49,14 +54,25 @@ exclude:
     - transfer window
     - quarterback
 
+# Every feed names the category it is briefed into. Each category becomes its
+# own standing feed in the reader, holding unread topics until you read them.
+# Categories appear on the home screen in the order they first appear here, so
+# this file's order is the reader's order. A feed with no category gets
+# "general".
 feeds:
   - name: Tagesschau
+    category: news
     url: https://www.tagesschau.de/index~rss2.xml
-  - name: Heise
-    url: https://www.heise.de/rss/heise-atom.xml
   - name: The Guardian — World
+    category: news
     url: https://www.theguardian.com/world/rss
+
+  - name: Heise
+    category: tech
+    url: https://www.heise.de/rss/heise-atom.xml
   - name: Ars Technica
+    category: tech
     url: https://feeds.arstechnica.com/arstechnica/index
   - name: Hacker News
+    category: tech
     url: https://hnrss.org/frontpage

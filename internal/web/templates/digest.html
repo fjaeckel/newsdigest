@@ -30,41 +30,7 @@
   {{end}}
 
   <ul class="topics">
-    {{range .Digest.Topics}}
-    <li class="topic {{if index $.Read .ID}}is-read{{end}} {{if .Important}}is-important{{end}}"
-        data-id="{{.ID}}">
-      <button type="button" class="topic-main" aria-label="Toggle read">
-        <div class="topic-head">
-          {{if .Tag}}<span class="tag">{{.Tag}}</span>{{end}}
-          <span class="dot" aria-hidden="true"></span>
-        </div>
-        <h2>{{.Headline}}</h2>
-        <p class="summary">{{.Summary}}</p>
-      </button>
-      {{with groupSources .Sources}}
-      <ul class="sources">
-        {{range .}}
-          {{if eq (len .Articles) 1}}
-            {{with index .Articles 0}}
-        <li><a class="src" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}</a></li>
-            {{end}}
-          {{else}}
-        <li class="src-group">
-          <details>
-            <summary class="src">{{.Feed}}<span class="src-count">{{len .Articles}}</span></summary>
-            <ul class="src-list">
-              {{range .Articles}}
-              <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></li>
-              {{end}}
-            </ul>
-          </details>
-        </li>
-          {{end}}
-        {{end}}
-      </ul>
-      {{end}}
-    </li>
-    {{end}}
+    {{range .Cards}}{{template "topic-card" .}}{{end}}
   </ul>
 
   <details class="debug">

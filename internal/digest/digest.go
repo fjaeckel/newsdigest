@@ -103,9 +103,44 @@ func (g *Generator) Run(ctx context.Context, date string) (*store.Digest, error)
 		return d, nil
 	}
 
+	// Each category is briefed on its own, so max_topics is a per-category
+	// budget and a quiet category can't be squeezed out by a loud one. One
+	// category failing costs that category its brief, not the whole morning.
+	for _, cat := range g.Cfg.Categories() {
+		items := itemsInCategory(fetched.Items, cat)
+		if len(items) == 0 {
+			continue
+		}
+
+		topics, err := g.briefCategory(ctx, cat, items, date)
+		if err != nil {
+			g.Log.Error("category brief failed", "category", cat, "err", err)
+			d.Errors = append(d.Errors, fmt.Sprintf("%s: %v", cat, err))
+			continue
+		}
+		g.Log.Info("category briefed", "category", cat, "items", len(items), "topics", len(topics))
+		d.Topics = append(d.Topics, topics...)
+	}
+
+	if len(d.Topics) == 0 && len(d.Errors) > len(fetched.Errors) {
+		return nil, fmt.Errorf("every category failed to summarise")
+	}
+
+	d.Stats.Topics = len(d.Topics)
+	d.Stats.DurationSecs = int(time.Since(started).Seconds())
+
+	if err := g.Store.SaveDigest(d); err != nil {
+		return nil, err
+	}
+	g.Log.Info("digest saved", "date", date, "topics", len(d.Topics), "took", time.Since(started).Round(time.Second))
+	return d, nil
+}
+
+// briefCategory runs one category's items through Claude and returns its topics.
+func (g *Generator) briefCategory(ctx context.Context, cat string, items []feeds.Item, date string) ([]store.Topic, error) {
 	raw, err := g.Backend.Complete(ctx, claude.Request{
-		System: systemPrompt(g.Cfg),
-		User:   userPrompt(fetched.Items, g.Cfg.Location),
+		System: systemPrompt(g.Cfg, cat),
+		User:   userPrompt(items, g.Cfg.Location),
 		Model:  g.Cfg.Model,
 		Effort: g.Cfg.Effort,
 		Schema: schema(),
@@ -123,20 +158,23 @@ func (g *Generator) Run(ctx context.Context, date string) (*store.Digest, error)
 		return nil, fmt.Errorf("decode response: %w (got %.200q)", err, jsonText)
 	}
 
-	d.Topics = buildTopics(parsed, fetched.Items, date)
-	d.Stats.Topics = len(d.Topics)
-	d.Stats.DurationSecs = int(time.Since(started).Seconds())
+	return buildTopics(parsed, items, date, cat), nil
+}
 
-	if err := g.Store.SaveDigest(d); err != nil {
-		return nil, err
+// itemsInCategory keeps the newest-first order the fetcher produced.
+func itemsInCategory(items []feeds.Item, cat string) []feeds.Item {
+	var out []feeds.Item
+	for _, it := range items {
+		if it.Category == cat {
+			out = append(out, it)
+		}
 	}
-	g.Log.Info("digest saved", "date", date, "topics", len(d.Topics), "took", time.Since(started).Round(time.Second))
-	return d, nil
+	return out
 }
 
 // buildTopics maps the model's source indexes back onto the real items, so
 // links and outlet names come from the feed rather than from the model.
-func buildTopics(parsed modelTopics, items []feeds.Item, date string) []store.Topic {
+func buildTopics(parsed modelTopics, items []feeds.Item, date, cat string) []store.Topic {
 	topics := make([]store.Topic, 0, len(parsed.Topics))
 
 	for _, t := range parsed.Topics {
@@ -160,7 +198,8 @@ func buildTopics(parsed modelTopics, items []feeds.Item, date string) []store.To
 		}
 
 		topics = append(topics, store.Topic{
-			ID:        topicID(date, headline),
+			ID:        topicID(date, cat, headline),
+			Category:  cat,
 			Headline:  headline,
 			Summary:   strings.TrimSpace(t.Summary),
 			Tag:       strings.ToLower(strings.TrimSpace(t.Tag)),
@@ -171,20 +210,24 @@ func buildTopics(parsed modelTopics, items []feeds.Item, date string) []store.To
 	return topics
 }
 
-// topicID is stable for a given date+headline so read marks survive a rerun.
-func topicID(date, headline string) string {
-	sum := sha1.Sum([]byte(date + "\x00" + strings.ToLower(headline)))
+// topicID is stable for a given date+category+headline so read marks survive a
+// rerun of the same day.
+func topicID(date, cat, headline string) string {
+	sum := sha1.Sum([]byte(date + "\x00" + cat + "\x00" + strings.ToLower(headline)))
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-func systemPrompt(cfg *config.Config) string {
+func systemPrompt(cfg *config.Config, cat string) string {
 	var b strings.Builder
 
-	b.WriteString(`You are the editor of one person's daily news briefing. You receive raw items pulled from their RSS feeds over the last day and turn them into a short brief they can skim over coffee in about two minutes.
+	fmt.Fprintf(&b, `You are the editor of one person's daily briefing on a single subject: %s. You receive raw items pulled from the feeds they follow on that subject over the last day, and turn them into a short brief they can skim over coffee.
 
-Rules:
+Every item you are given belongs to this subject already, so do not set anything aside for being off-topic, niche, or too specialist. Judge importance within %s, not against the news of the world: for a %s brief, the biggest %s story of the day leads, even on a day when it would never make a general front page.
+
+Rules:`, cat, cat, cat, cat)
+	b.WriteString(`
 - Group items covering the same story into ONE topic, even across different outlets. Merge aggressively.
-- Order topics by how much they matter to a generally informed reader. Most important first.
+- Order topics by how much they matter to someone who follows this subject closely. Most important first.
 - headline: at most 80 characters, plain and factual. No clickbait, no "here's why", no questions.
 - summary: 1-3 sentences, 45 words maximum. What happened, and why it matters. Assume the reader has not followed the story, but do not pad with background.
 - Never invent facts, numbers, or quotes. Many items give you only a headline; when that is all you have, keep the summary to what it supports.

@@ -24,7 +24,11 @@ type Source struct {
 
 // Topic is one merged story in the brief.
 type Topic struct {
-	ID        string   `json:"id"`
+	ID string `json:"id"`
+	// Category is the feed category this topic was briefed from, and decides
+	// which standing feed it belongs to. Empty on digests written before
+	// categories existed.
+	Category  string   `json:"category,omitempty"`
 	Headline  string   `json:"headline"`
 	Summary   string   `json:"summary"`
 	Tag       string   `json:"tag"`
@@ -193,7 +197,55 @@ func (s *Store) SetRead(date, topicID string, read bool) error {
 	return s.persistReadLocked()
 }
 
+// SetManyRead marks a subset of one day's topics read or unread, leaving every
+// other topic on that day alone. SetAllRead replaces the day wholesale, which
+// is right when the caller owns the whole day but destructive for a subset:
+// clearing one category would drop the read marks of every other category
+// briefed on the same date.
+func (s *Store) SetManyRead(date string, topicIDs []string, read bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(topicIDs) == 0 {
+		return nil
+	}
+
+	subset := make(map[string]bool, len(topicIDs))
+	for _, id := range topicIDs {
+		subset[id] = true
+	}
+
+	var next []string
+	if read {
+		seen := make(map[string]bool, len(s.read[date]))
+		for _, id := range s.read[date] {
+			seen[id] = true
+			next = append(next, id)
+		}
+		for _, id := range topicIDs {
+			if !seen[id] {
+				seen[id] = true
+				next = append(next, id)
+			}
+		}
+	} else {
+		for _, id := range s.read[date] {
+			if !subset[id] {
+				next = append(next, id)
+			}
+		}
+	}
+
+	if len(next) == 0 {
+		delete(s.read, date)
+	} else {
+		s.read[date] = next
+	}
+	return s.persistReadLocked()
+}
+
 // SetAllRead marks every given topic ID read (or clears the date entirely).
+// The caller must own the whole day; use SetManyRead for a subset.
 func (s *Store) SetAllRead(date string, topicIDs []string, read bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

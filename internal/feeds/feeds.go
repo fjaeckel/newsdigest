@@ -23,6 +23,7 @@ type Item struct {
 	Link      string
 	Summary   string
 	Feed      string
+	Category  string
 	Published time.Time
 }
 
@@ -90,10 +91,27 @@ func Fetch(ctx context.Context, cfg *config.Config) Result {
 	res.Items = dropExcluded(res.Items, cfg.Exclude.Keywords)
 	res.Excluded = before - len(res.Items)
 
-	if cfg.MaxItemsTotal > 0 && len(res.Items) > cfg.MaxItemsTotal {
-		res.Items = res.Items[:cfg.MaxItemsTotal]
+	// The cap is per category, not global: each category is briefed on its own,
+	// so a busy day of cycling posts must not crowd aviation out of its feed.
+	if cfg.MaxItemsTotal > 0 {
+		res.Items = capPerCategory(res.Items, cfg.MaxItemsTotal)
 	}
 	return res
+}
+
+// capPerCategory keeps at most n items per category, preferring the newest.
+// Items arrive sorted newest-first and that order is preserved.
+func capPerCategory(items []Item, n int) []Item {
+	counts := map[string]int{}
+	kept := items[:0]
+	for _, it := range items {
+		if counts[it.Category] >= n {
+			continue
+		}
+		counts[it.Category]++
+		kept = append(kept, it)
+	}
+	return kept
 }
 
 func fetchOne(ctx context.Context, client *http.Client, f config.Feed, cutoff time.Time, limit int) ([]Item, error) {
@@ -140,6 +158,7 @@ func fetchOne(ctx context.Context, client *http.Client, f config.Feed, cutoff ti
 			Link:      strings.TrimSpace(e.Link),
 			Summary:   truncate(clean(firstNonEmpty(e.Description, e.Content)), maxSummaryRunes),
 			Feed:      f.Name,
+			Category:  f.Category,
 			Published: published,
 		})
 		if limit > 0 && len(out) >= limit {

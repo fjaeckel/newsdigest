@@ -29,7 +29,11 @@
       var read = !topic.classList.contains("is-read");
       topic.classList.toggle("is-read", read); // optimistic
 
-      post("/api/read", { date: date, id: topic.dataset.id, read: read })
+      // A tag feed mixes days on one page, so each card carries its own date;
+      // the digest page falls back to the single date on <body>.
+      var topicDate = topic.dataset.date || date;
+
+      post("/api/read", { date: topicDate, id: topic.dataset.id, read: read })
         .then(function (res) { setUnread(res.unread); })
         .catch(function () { topic.classList.toggle("is-read", !read); });
     });
@@ -58,15 +62,23 @@
   }
 
   // --- hide-read toggle, remembered per device ---
+  // A category feed is a standing inbox: it carries unread topics forward
+  // indefinitely, so read ones drop out by default and the toggle brings them
+  // back. The daily brief is a snapshot of one day and defaults the other way,
+  // so the two pages keep their preference under separate keys.
+
+  var isFeed = document.body.classList.contains("cat-feed");
+  var readKey = isFeed ? "hideReadFeed" : "hideRead";
 
   var toggle = document.getElementById("toggle-read");
   if (toggle) {
-    var hidden = localStorage.getItem("hideRead") === "1";
+    var stored = localStorage.getItem(readKey);
+    var hidden = stored === null ? isFeed : stored === "1";
     apply(hidden);
 
     toggle.addEventListener("click", function () {
       hidden = !hidden;
-      localStorage.setItem("hideRead", hidden ? "1" : "0");
+      localStorage.setItem(readKey, hidden ? "1" : "0");
       apply(hidden);
     });
   }
@@ -75,6 +87,30 @@
     document.body.classList.toggle("hide-read", on);
     toggle.setAttribute("aria-pressed", on ? "true" : "false");
     toggle.textContent = on ? "Show read" : "Hide read";
+  }
+
+  // --- clear a whole standing feed ---
+  // The feed spans every day it has ever briefed, so this can't be done by
+  // walking the page; the server marks the category across all of them.
+
+  var markCat = document.getElementById("mark-category");
+  if (markCat) {
+    markCat.addEventListener("click", function () {
+      var topics = document.querySelectorAll(".topic");
+      var allRead = Array.prototype.every.call(topics, function (t) {
+        return t.classList.contains("is-read");
+      });
+      var read = !allRead;
+
+      topics.forEach(function (t) { t.classList.toggle("is-read", read); });
+      markCat.textContent = read ? "Unmark all" : "Mark all";
+
+      post("/api/read-category", { category: document.body.dataset.category, read: read })
+        .then(function (res) { setUnread(res.unread); })
+        .catch(function () {
+          topics.forEach(function (t) { t.classList.toggle("is-read", !read); });
+        });
+    });
   }
 
   // --- whether outlets with several articles fan out by default ---

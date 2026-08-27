@@ -15,7 +15,46 @@
 
 {{define "footer-nav"}}
 <nav class="footnav">
-  <a href="/">Today</a>
+  <a href="/">Feeds</a>
   <a href="/archive">Archive</a>
 </nav>
+{{end}}
+
+{{/* One topic, as rendered by both the daily digest and a category feed. Takes
+     a TopicCard. data-date is what lets a category feed, which mixes days on
+     one page, mark the right digest read. */}}
+{{define "topic-card"}}
+<li class="topic {{if .Read}}is-read{{end}} {{if .Topic.Important}}is-important{{end}}"
+    data-id="{{.Topic.ID}}" data-date="{{.Date}}">
+  <button type="button" class="topic-main" aria-label="Toggle read">
+    <div class="topic-head">
+      {{if .Topic.Tag}}<span class="tag">{{.Topic.Tag}}</span>{{end}}
+      <span class="dot" aria-hidden="true"></span>
+    </div>
+    <h2>{{.Topic.Headline}}</h2>
+    <p class="summary">{{.Topic.Summary}}</p>
+  </button>
+  {{with groupSources .Topic.Sources}}
+  <ul class="sources">
+    {{range .}}
+      {{if eq (len .Articles) 1}}
+        {{with index .Articles 0}}
+    <li><a class="src" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}</a></li>
+        {{end}}
+      {{else}}
+    <li class="src-group">
+      <details>
+        <summary class="src">{{.Feed}}<span class="src-count">{{len .Articles}}</span></summary>
+        <ul class="src-list">
+          {{range .Articles}}
+          <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></li>
+          {{end}}
+        </ul>
+      </details>
+    </li>
+      {{end}}
+    {{end}}
+  </ul>
+  {{end}}
+</li>
 {{end}}

@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -60,6 +61,11 @@ func New(cfg *config.Config, st *store.Store, gen *digest.Generator, log *slog.L
 			return t.Format("Mon 2 Jan")
 		},
 		"groupSources": groupSources,
+		// A category is free text from the config and can carry a space
+		// ("general aviation"), so it gets escaped rather than pasted in.
+		"catURL": func(cat string) string {
+			return "/c/" + url.PathEscape(cat)
+		},
 	}
 
 	tpl, err := template.New("").Funcs(funcs).ParseFS(templateFS, "templates/*.html")
@@ -86,11 +92,13 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.Handle("GET /static/", http.FileServerFS(staticFS))
 
-	mux.HandleFunc("GET /{$}", s.handleLatest)
+	mux.HandleFunc("GET /{$}", s.handleHome)
 	mux.HandleFunc("GET /d/{date}", s.handleDigest)
+	mux.HandleFunc("GET /c/{category}", s.handleCategory)
 	mux.HandleFunc("GET /archive", s.handleArchive)
 	mux.HandleFunc("POST /api/read", s.handleRead)
 	mux.HandleFunc("POST /api/read-all", s.handleReadAll)
+	mux.HandleFunc("POST /api/read-category", s.handleReadCategory)
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 
@@ -145,19 +153,103 @@ type pageData struct {
 	NextDate    string
 	Generating  bool
 	Title       string
+
+	// Cards are the topics to render, in order. Both the daily digest and a
+	// category feed render the same card partial, so they share one shape.
+	Cards []TopicCard
+
+	// Set on the home screen.
+	Categories  []CategoryLink
+	TotalUnread int
+	LatestDate  string
+
+	// Set on a category feed only.
+	Category string
+	Days     []FeedDay
+	Total    int
+	Capped   bool
 }
 
-func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
-	d, err := s.Store.Latest()
+// CategoryLink is one standing feed on the home screen.
+type CategoryLink struct {
+	Name   string
+	Unread int
+	Total  int
+}
+
+// FeedDay groups a category feed's topics under the day they were briefed.
+type FeedDay struct {
+	Date  string
+	Cards []TopicCard
+}
+
+// TopicCard is one rendered topic. Date travels with it because a category
+// feed mixes days on one page and marking read has to know which digest to
+// write to.
+type TopicCard struct {
+	Topic store.Topic
+	Read  bool
+	Date  string
+}
+
+// handleHome lists the standing feeds with what is still unread in each.
+func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
+	dates, err := s.Store.Dates()
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	if d == nil {
+	if len(dates) == 0 {
 		s.renderEmpty(w)
 		return
 	}
-	s.renderDigest(w, d)
+
+	unread := map[string]int{}
+	total := map[string]int{}
+	var extra []string // categories present on disk but no longer in the config
+
+	known := map[string]bool{}
+	for _, c := range s.Cfg.Categories() {
+		known[c] = true
+	}
+
+	for _, date := range dates {
+		d, err := s.Store.LoadDigest(date)
+		if err != nil || d == nil {
+			continue
+		}
+		readSet := s.Store.ReadSet(date)
+		for _, t := range d.Topics {
+			cat := t.Category
+			if cat == "" {
+				cat = config.DefaultCategory
+			}
+			if !known[cat] && total[cat] == 0 {
+				extra = append(extra, cat)
+			}
+			total[cat]++
+			if !readSet[t.ID] {
+				unread[cat]++
+			}
+		}
+	}
+
+	// Config order first so the reader's own ordering wins, then anything left
+	// over from an older config so its topics stay reachable.
+	links := make([]CategoryLink, 0, len(total))
+	sum := 0
+	for _, cat := range append(s.Cfg.Categories(), extra...) {
+		links = append(links, CategoryLink{Name: cat, Unread: unread[cat], Total: total[cat]})
+		sum += unread[cat]
+	}
+
+	s.render(w, "home.html", pageData{
+		Categories:  links,
+		TotalUnread: sum,
+		LatestDate:  dates[0],
+		Dates:       dates,
+		Title:       "Digest",
+	})
 }
 
 func (s *Server) handleDigest(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +269,12 @@ func (s *Server) renderDigest(w http.ResponseWriter, d *store.Digest) {
 	readSet := s.Store.ReadSet(d.Date)
 
 	unread := 0
+	cards := make([]TopicCard, 0, len(d.Topics))
 	for _, t := range d.Topics {
 		if !readSet[t.ID] {
 			unread++
 		}
+		cards = append(cards, TopicCard{Topic: t, Read: readSet[t.ID], Date: d.Date})
 	}
 
 	dates, err := s.Store.Dates()
@@ -216,7 +310,84 @@ func (s *Server) renderDigest(w http.ResponseWriter, d *store.Digest) {
 		NextDate:    next,
 		Generating:  generating,
 		Title:       "Digest " + d.Date,
+		Cards:       cards,
 	})
+}
+
+// maxFeedTopics bounds how much of a category feed is rendered at once. The
+// archive is pruned, but a long-lived install shouldn't build an unbounded
+// page on a phone. Unread counts are tallied over everything regardless, so
+// the header stays honest even when the list below it is trimmed.
+const maxFeedTopics = 200
+
+// handleCategory serves one standing feed: every topic briefed into that
+// category, newest day first, carried forward until it is read.
+func (s *Server) handleCategory(w http.ResponseWriter, r *http.Request) {
+	cat := strings.ToLower(strings.TrimSpace(r.PathValue("category")))
+	if cat == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	dates, err := s.Store.Dates()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	var (
+		days     []FeedDay
+		rendered int
+		total    int
+		unread   int
+		capped   bool
+	)
+	for _, date := range dates {
+		d, err := s.Store.LoadDigest(date)
+		if err != nil || d == nil {
+			// A single unreadable day shouldn't take the whole feed down.
+			continue
+		}
+		readSet := s.Store.ReadSet(date)
+
+		var cards []TopicCard
+		for _, t := range d.Topics {
+			if topicCategory(t) != cat {
+				continue
+			}
+			total++
+			if !readSet[t.ID] {
+				unread++
+			}
+			if rendered >= maxFeedTopics {
+				capped = true
+				continue
+			}
+			cards = append(cards, TopicCard{Topic: t, Read: readSet[t.ID], Date: date})
+			rendered++
+		}
+		if len(cards) > 0 {
+			days = append(days, FeedDay{Date: date, Cards: cards})
+		}
+	}
+
+	s.render(w, "category.html", pageData{
+		Dates:       dates,
+		Category:    cat,
+		Days:        days,
+		Total:       total,
+		UnreadCount: unread,
+		Capped:      capped,
+		Title:       cat,
+	})
+}
+
+// topicCategory falls back for digests written before categories existed.
+func topicCategory(t store.Topic) string {
+	if t.Category == "" {
+		return config.DefaultCategory
+	}
+	return t.Category
 }
 
 func (s *Server) renderEmpty(w http.ResponseWriter) {
@@ -284,6 +455,71 @@ func (s *Server) handleReadAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeUnread(w, req.Date)
+}
+
+type readCategoryRequest struct {
+	Category string `json:"category"`
+	Read     bool   `json:"read"`
+}
+
+// handleReadCategory clears (or restores) a whole standing feed. Because the
+// feed carries unread items forward indefinitely, there has to be a way to
+// draw a line under it without opening every day it spans.
+func (s *Server) handleReadCategory(w http.ResponseWriter, r *http.Request) {
+	var req readCategoryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	cat := strings.ToLower(strings.TrimSpace(req.Category))
+	if cat == "" {
+		http.Error(w, "category is required", http.StatusBadRequest)
+		return
+	}
+
+	dates, err := s.Store.Dates()
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+
+	for _, date := range dates {
+		d, err := s.Store.LoadDigest(date)
+		if err != nil || d == nil {
+			continue
+		}
+		var ids []string
+		for _, t := range d.Topics {
+			if topicCategory(t) == cat {
+				ids = append(ids, t.ID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		// A subset of the day: other categories briefed on this date keep
+		// their own read marks.
+		if err := s.Store.SetManyRead(date, ids, req.Read); err != nil {
+			s.fail(w, err)
+			return
+		}
+	}
+
+	// Report what is still unread in this category, for the header.
+	unread := 0
+	for _, date := range dates {
+		d, err := s.Store.LoadDigest(date)
+		if err != nil || d == nil {
+			continue
+		}
+		readSet := s.Store.ReadSet(date)
+		for _, t := range d.Topics {
+			if topicCategory(t) == cat && !readSet[t.ID] {
+				unread++
+			}
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "unread": unread})
 }
 
 func (s *Server) writeUnread(w http.ResponseWriter, date string) {

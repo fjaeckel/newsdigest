@@ -11,11 +11,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Feed is a single RSS/Atom source.
+// Feed is a single RSS/Atom source. Category decides which standing feed its
+// items are briefed into; every feed belongs to exactly one.
 type Feed struct {
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
+	Name     string `yaml:"name"`
+	URL      string `yaml:"url"`
+	Category string `yaml:"category"`
 }
+
+// DefaultCategory catches feeds that don't name one, so a missing category is
+// a tidy-up job rather than a startup failure.
+const DefaultCategory = "general"
 
 // Exclude describes what never makes it into the brief. Topics are handed to
 // Claude verbatim; Keywords are a cheap local pre-filter applied first.
@@ -75,6 +81,11 @@ func Load(path string) (*Config, error) {
 		if strings.TrimSpace(f.Name) == "" {
 			cfg.Feeds[i].Name = f.URL
 		}
+		cat := strings.ToLower(strings.TrimSpace(f.Category))
+		if cat == "" {
+			cat = DefaultCategory
+		}
+		cfg.Feeds[i].Category = cat
 	}
 
 	loc, err := time.LoadLocation(cfg.Timezone)
@@ -100,6 +111,21 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Categories lists the distinct feed categories in the order they first appear
+// in the config, so the reader's own ordering is what shows up in the UI.
+func (c *Config) Categories() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range c.Feeds {
+		if seen[f.Category] {
+			continue
+		}
+		seen[f.Category] = true
+		out = append(out, f.Category)
+	}
+	return out
 }
 
 // cronSpec turns "08:00" into a robfig/cron daily spec.

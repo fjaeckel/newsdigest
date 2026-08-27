@@ -106,9 +106,9 @@ func run(log *slog.Logger, once bool, dateFlag string) error {
 		log.Info("next scheduled run", "at", entries[0].Next.Format(time.RFC1123))
 	}
 
-	// If the container starts after today's scheduled time and nothing has been
-	// generated yet, catch up instead of showing an empty page until tomorrow.
-	go catchUp(context.Background(), log, cfg, st, gen)
+	// Make sure today has a brief before anyone opens the page. Runs in the
+	// background so the server starts listening immediately.
+	go ensureToday(context.Background(), log, cfg, st, gen)
 
 	// --- http ---
 
@@ -144,28 +144,73 @@ func run(log *slog.Logger, once bool, dateFlag string) error {
 	return httpSrv.Shutdown(ctx)
 }
 
-func catchUp(ctx context.Context, log *slog.Logger, cfg *config.Config, st *store.Store, gen *digest.Generator) {
+// ensureToday gives the reader something to open on startup.
+//
+// Nothing synced at all today — no run has happened — is the case that ignores
+// the clock: waiting for run_at would leave an empty page for hours, and there
+// is nothing to lose by briefing early.
+//
+// A day that ran and produced nothing in any category is different. That is a
+// real, completed run over a quiet lookback window, so the run_at guard still
+// applies to retrying it: before the scheduled time a restart leaves it alone,
+// after it a retry is worth the tokens because the feeds have had all morning
+// to publish.
+//
+// A day that already has topics is never regenerated here, however uneven the
+// categories are. A category is legitimately empty on plenty of days, so
+// treating a quiet one as a gap to fill would re-run the model on every restart.
+func ensureToday(ctx context.Context, log *slog.Logger, cfg *config.Config, st *store.Store, gen *digest.Generator) {
 	now := time.Now().In(cfg.Location)
 	today := now.Format("2006-01-02")
 
-	if now.Before(cfg.RunAtToday(now)) {
-		return // today's run hasn't come round yet
-	}
 	existing, err := st.LoadDigest(today)
 	if err != nil {
-		log.Warn("catch-up check failed", "err", err)
-		return
-	}
-	if existing != nil {
+		log.Warn("startup digest check failed", "err", err)
 		return
 	}
 
-	log.Info("no digest for today and the scheduled time has passed; generating now", "date", today)
+	generate, reason := shouldBriefOnStartup(existing, now, cfg.RunAtToday(now))
+	if !generate {
+		log.Info("startup: leaving today alone", "date", today, "reason", reason)
+		return
+	}
+	log.Info("startup: briefing today", "date", today, "reason", reason)
+
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
 	if _, err := gen.Run(ctx, today); err != nil {
-		log.Error("catch-up digest failed", "err", err)
+		log.Error("startup digest failed", "date", today, "err", err)
 	}
+}
+
+// shouldBriefOnStartup is the decision above, split out so it can be tested
+// without a store, a backend or a clock.
+func shouldBriefOnStartup(existing *store.Digest, now, runAt time.Time) (bool, string) {
+	switch {
+	case existing == nil:
+		return true, "nothing synced today"
+	case len(existing.Topics) > 0 && !anyCategorised(existing.Topics):
+		// Written before feeds had categories, so every topic would land in
+		// "general" and the standing feeds would all read empty. Re-brief it
+		// once, whatever the clock says; config.Load gives every feed a
+		// category, so a fresh run can never look like this again.
+		return true, "today predates categories"
+	case len(existing.Topics) > 0:
+		return false, "already briefed"
+	case now.Before(runAt):
+		return false, "ran empty, before run_at"
+	default:
+		return true, "ran empty, run_at has passed"
+	}
+}
+
+func anyCategorised(topics []store.Topic) bool {
+	for _, t := range topics {
+		if t.Category != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func env(key, fallback string) string {

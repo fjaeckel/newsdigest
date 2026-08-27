@@ -6,6 +6,11 @@ Every morning it fetches your feeds, has Claude merge the day's articles into a
 short list of topics, and serves them as a web page you can skim and tap to mark
 read. Sports (or anything else you name) never makes it in.
 
+Each feed belongs to a **category** — news, cycling, aviation, whatever you like
+— and every category gets its own brief and its own standing feed. A category
+holds unread topics until you read them, so missing a morning doesn't mean
+missing the news.
+
 - **One Go binary, one container.** No database — digests are JSON files on disk.
 - **Works with your Claude subscription.** No per-token API bill required.
 - **Phone-first.** Add it to your home screen and it behaves like an app.
@@ -52,6 +57,9 @@ version. The parts you'll actually change:
 timezone: Europe/Berlin
 run_at: "08:00"
 
+# Per category, per day — not a total shared across them.
+max_topics: 18
+
 exclude:
   topics:
     - Sports of any kind — matches, results, transfers, athletes, leagues.
@@ -59,8 +67,19 @@ exclude:
 
 feeds:
   - name: Tagesschau
+    category: news
     url: https://www.tagesschau.de/index~rss2.xml
+  - name: road.cc
+    category: cycling
+    url: https://road.cc/feed
 ```
+
+Every feed names a `category`, and each category is briefed separately: one
+Claude call per category that has items that day, with its own `max_topics`
+budget. That's what stops a loud category from crowding out a quiet one — and
+it's also why the categories you choose drive the token bill. A feed with no
+`category` falls back to `general`. Categories appear on the home screen in the
+order they first appear in the file, so the file's order is the reader's order.
 
 Exclusion happens twice. `keywords` is a cheap local substring filter that drops
 obvious junk before it costs you any tokens; `topics` is free text handed to
@@ -79,7 +98,8 @@ black-on-white by choice and stays that way regardless of your device theme.
 
 - **Tap a topic** to mark it read — it dims, and the unread count drops.
 - **Hide read** collapses what you've already seen. The setting sticks per device.
-- **Mark all** when you're done for the morning.
+- **Mark all** when you're done — on a category feed this clears every day it
+  spans, not just the one on screen.
 - **‹ ›** move between days; **Archive** lists everything kept.
 
 Sources sit under each topic as one chip per outlet. When an outlet ran several
@@ -87,6 +107,16 @@ pieces on a story they're all kept — the chip carries a count and opens to the
 individual articles by headline. **Expand sources** flips whether those open by
 default; either way you can always tap a chip to dig in. That setting sticks per
 device too.
+
+The home screen is your categories, each with its unread count. Tapping one
+opens `/c/<category>`: that category's standing feed, newest day first, holding
+every topic briefed into it that you haven't read yet. Read topics drop out of
+the view — **Show read** brings them back — so the feed works as an inbox rather
+than a daily snapshot you can miss. A day heading disappears once everything
+under it has been read.
+
+Each day heading links back to `/d/<date>`, the full cross-category brief for
+that day, which is also reachable from the bottom of the home screen.
 
 Read state lives on the server, so marking something read on your phone also
 marks it read on your laptop.
@@ -133,12 +163,22 @@ come from your feeds, never from the model — it can't invent a source. Indexes
 that don't exist are dropped rather than guessed at.
 
 A feed that's down shows up under **Run details** at the bottom of the page
-instead of silently shrinking your brief. Topic IDs are derived from the date
+instead of silently shrinking your brief. A category whose brief fails costs
+that category its topics for the day, not the whole morning — the failure is
+listed alongside the dead feeds. Topic IDs are derived from the date, category
 and headline, so regenerating a day keeps your read marks intact.
 
-If the container starts after `run_at` and today's digest is missing, it
-generates one immediately rather than leaving you with a blank page until
-tomorrow.
+**On startup** it makes sure the day has something to read:
+
+- Nothing synced yet today → it briefs immediately, whatever the time. Waiting
+  for `run_at` would leave a blank page for hours and there's nothing to lose by
+  running early.
+- Today ran but produced nothing in any category → that's a real result over a
+  quiet window, so `run_at` still guards the retry. Before it, the day is left
+  alone; after it, a restart retries.
+- Today already has topics → never regenerated, however uneven the categories
+  are. A quiet category is normal, and treating one as a gap to fill would
+  re-run the model on every restart.
 
 ## Data on disk
 

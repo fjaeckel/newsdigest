@@ -33,6 +33,26 @@ func (s *stubBackend) Complete(_ context.Context, req claude.Request) (string, e
 	return s.response, nil
 }
 
+// countingBackend records every call, so a test can prove each category got
+// its own brief, and can fail a chosen one.
+type countingBackend struct {
+	response  string
+	failFirst bool
+	calls     int
+	systems   []string
+}
+
+func (b *countingBackend) Name() string { return "counting" }
+
+func (b *countingBackend) Complete(_ context.Context, req claude.Request) (string, error) {
+	b.calls++
+	b.systems = append(b.systems, req.System)
+	if b.failFirst && b.calls == 1 {
+		return "", fmt.Errorf("backend exploded")
+	}
+	return b.response, nil
+}
+
 const feedXML = `<?xml version="1.0"?>
 <rss version="2.0"><channel>
   <title>Test Feed</title>
@@ -72,7 +92,7 @@ func setup(t *testing.T, response string) harness {
 	cfgPath := filepath.Join(dir, "feeds.yaml")
 	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
 		"exclude:\n  topics:\n    - Sports of any kind.\n  keywords:\n    - bundesliga\n" +
-		"feeds:\n  - name: Test Feed\n    url: " + feedSrv.URL + "\n"
+		"feeds:\n  - name: Test Feed\n    category: news\n    url: " + feedSrv.URL + "\n"
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +157,14 @@ func TestGenerateAndRender(t *testing.T) {
 		t.Errorf("want 1 pre-filtered item, got %d", d.Stats.FilteredOut)
 	}
 
+	if d.Topics[0].Category != "news" {
+		t.Errorf("topic category = %q, want the feed's category", d.Topics[0].Category)
+	}
+
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/d/"+date, nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET / = %d", rec.Code)
+		t.Fatalf("GET /d/%s = %d", date, rec.Code)
 	}
 	body := rec.Body.String()
 	for _, want := range []string{
@@ -155,6 +179,114 @@ func TestGenerateAndRender(t *testing.T) {
 	}
 	if strings.Contains(body, "Bundesliga") {
 		t.Error("sports leaked into the rendered page")
+	}
+}
+
+// Every category is briefed separately, so max_topics is a budget each one
+// gets rather than a total shared across the morning.
+func TestEachCategoryIsBriefedSeparately(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC1123Z)
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		io.WriteString(w, strings.Replace(feedXML, "%s", now, 2))
+	}))
+	t.Cleanup(feedSrv.Close)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "feeds.yaml")
+	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+		"feeds:\n" +
+		"  - name: News Feed\n    category: news\n    url: " + feedSrv.URL + "\n" +
+		"  - name: Bike Feed\n    category: cycling\n    url: " + feedSrv.URL + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Categories(); len(got) != 2 || got[0] != "news" || got[1] != "cycling" {
+		t.Fatalf("categories should follow config order, got %v", got)
+	}
+
+	st, err := store.New(filepath.Join(dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &countingBackend{response: goodResponse}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gen := &digest.Generator{Cfg: cfg, Store: st, Backend: backend, Log: log}
+
+	date := time.Now().UTC().Format("2006-01-02")
+	d, err := gen.Run(context.Background(), date)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	if backend.calls != 2 {
+		t.Errorf("want one Claude call per category, got %d", backend.calls)
+	}
+	if len(d.Topics) != 2 {
+		t.Fatalf("want a topic from each category, got %d", len(d.Topics))
+	}
+	seen := map[string]bool{}
+	for _, tp := range d.Topics {
+		seen[tp.Category] = true
+	}
+	if !seen["news"] || !seen["cycling"] {
+		t.Errorf("topics not attributed to both categories: %+v", seen)
+	}
+	// Each brief is told which subject it is editing.
+	if !strings.Contains(backend.systems[0], "cycling") && !strings.Contains(backend.systems[1], "cycling") {
+		t.Error("no prompt named the cycling category")
+	}
+}
+
+// One category's brief failing must not cost the others theirs.
+func TestOneCategoryFailingKeepsTheRest(t *testing.T) {
+	now := time.Now().UTC().Format(time.RFC1123Z)
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		io.WriteString(w, strings.Replace(feedXML, "%s", now, 2))
+	}))
+	t.Cleanup(feedSrv.Close)
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "feeds.yaml")
+	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+		"feeds:\n" +
+		"  - name: News Feed\n    category: news\n    url: " + feedSrv.URL + "\n" +
+		"  - name: Bike Feed\n    category: cycling\n    url: " + feedSrv.URL + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load(cfgPath)
+	st, _ := store.New(filepath.Join(dir, "data"))
+
+	// Fail the first category, succeed on the second.
+	backend := &countingBackend{response: goodResponse, failFirst: true}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gen := &digest.Generator{Cfg: cfg, Store: st, Backend: backend, Log: log}
+
+	date := time.Now().UTC().Format("2006-01-02")
+	d, err := gen.Run(context.Background(), date)
+	if err != nil {
+		t.Fatalf("one failing category took down the whole run: %v", err)
+	}
+	if len(d.Topics) != 1 {
+		t.Fatalf("want the surviving category's topic, got %d", len(d.Topics))
+	}
+	if d.Topics[0].Category != "cycling" {
+		t.Errorf("wrong category survived: %q", d.Topics[0].Category)
+	}
+	var mentioned bool
+	for _, e := range d.Errors {
+		if strings.Contains(e, "news") {
+			mentioned = true
+		}
+	}
+	if !mentioned {
+		t.Errorf("the failure was not recorded on the digest: %v", d.Errors)
 	}
 }
 
@@ -282,7 +414,7 @@ func TestManyArticlesFromOneOutletCollapseButStayReachable(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/d/"+hn.date, nil))
 	body := rec.Body.String()
 
 	// One chip per outlet, not one per article.
@@ -303,6 +435,222 @@ func TestManyArticlesFromOneOutletCollapseButStayReachable(t *testing.T) {
 	}
 	if !strings.Contains(body, "https://t.de/x") {
 		t.Error("the single-article outlet was dropped")
+	}
+}
+
+// saveDay writes a hand-built digest so a test can span several days without
+// running the generator once per day.
+func saveDay(t *testing.T, st *store.Store, date string, topics ...store.Topic) {
+	t.Helper()
+	if err := st.SaveDigest(&store.Digest{
+		Date:        date,
+		GeneratedAt: time.Now().UTC(),
+		Model:       "stub",
+		Backend:     "stub",
+		Topics:      topics,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func topic(id, cat, headline string) store.Topic {
+	return store.Topic{
+		ID:       id,
+		Category: cat,
+		Tag:      cat,
+		Headline: headline,
+		Summary:  headline + " happened.",
+		Sources:  []store.Source{{Feed: "Test Feed", Title: headline, URL: "https://example.com/" + id}},
+	}
+}
+
+// The point of a standing feed: an unread topic from days ago is still there,
+// alongside today's, until it is read.
+func TestCategoryFeedCarriesUnreadForward(t *testing.T) {
+	hn := setup(t, goodResponse)
+	h := hn.srv.Handler()
+
+	saveDay(t, hn.store, "2026-08-20",
+		topic("c1", "cycling", "Pogacar confirms the Giro"),
+		topic("n1", "news", "Something newsworthy"))
+	saveDay(t, hn.store, "2026-08-21",
+		topic("c2", "cycling", "New Shimano groupset"))
+	saveDay(t, hn.store, "2026-08-22",
+		topic("a1", "aviation", "BasicMed rules updated"))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/cycling", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /c/cycling = %d", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// Days-old cycling still sits in the feed next to the newest.
+	for _, want := range []string{"Pogacar confirms the Giro", "New Shimano groupset"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("category feed missing %q", want)
+		}
+	}
+	// Other categories stay out of it entirely.
+	for _, unwanted := range []string{"Something newsworthy", "BasicMed rules updated"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("category feed leaked another category: %q", unwanted)
+		}
+	}
+	if strings.Index(body, "New Shimano groupset") > strings.Index(body, "Pogacar confirms the Giro") {
+		t.Error("category feed is not newest-first")
+	}
+	// Each card carries its own day, so marking read hits the right digest.
+	if !strings.Contains(body, `data-date="2026-08-20"`) || !strings.Contains(body, `data-date="2026-08-21"`) {
+		t.Error("cards are missing their source date")
+	}
+	if !strings.Contains(body, "https://example.com/c1") {
+		t.Error("sources missing from the category feed")
+	}
+}
+
+func TestCategoryFeedMarksTheRightDayRead(t *testing.T) {
+	hn := setup(t, goodResponse)
+	h := hn.srv.Handler()
+
+	saveDay(t, hn.store, "2026-08-20", topic("c1", "cycling", "Older cycling story"))
+	saveDay(t, hn.store, "2026-08-21", topic("c2", "cycling", "Newer cycling story"))
+
+	// This is the request a card on the feed makes: its own date, not today's.
+	body := `{"date":"2026-08-20","id":"c1","read":true}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/read", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/read = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !hn.store.ReadSet("2026-08-20")["c1"] {
+		t.Error("read mark did not land on the topic's own day")
+	}
+	if hn.store.ReadSet("2026-08-21")["c2"] {
+		t.Error("read mark bled onto another day")
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/cycling", nil))
+	if !strings.Contains(rec.Body.String(), `<span id="unread-count">1</span> unread of 2`) {
+		t.Error("category feed unread count did not follow the mark")
+	}
+}
+
+// Clearing a standing feed has to reach every day it spans, not just one.
+func TestMarkCategoryClearsEveryDay(t *testing.T) {
+	hn := setup(t, goodResponse)
+	h := hn.srv.Handler()
+
+	saveDay(t, hn.store, "2026-08-20",
+		topic("c1", "cycling", "Old cycling"),
+		topic("n1", "news", "Old news"),
+		topic("f1", "fun", "Old comic"))
+	saveDay(t, hn.store, "2026-08-21", topic("c2", "cycling", "New cycling"))
+
+	// A mark on another category, on a day cycling also occupies. Clearing
+	// cycling must not disturb it.
+	if err := hn.store.SetRead("2026-08-20", "f1", true); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/read-category",
+		strings.NewReader(`{"category":"cycling","read":true}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/read-category = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var res struct{ Unread int }
+	json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Unread != 0 {
+		t.Errorf("want the feed cleared, got %d unread", res.Unread)
+	}
+	if !hn.store.ReadSet("2026-08-20")["c1"] || !hn.store.ReadSet("2026-08-21")["c2"] {
+		t.Error("clearing the feed missed a day")
+	}
+	// Neighbours on the same date keep their own state, in both directions.
+	if hn.store.ReadSet("2026-08-20")["n1"] {
+		t.Error("clearing cycling also marked news read")
+	}
+	if !hn.store.ReadSet("2026-08-20")["f1"] {
+		t.Error("clearing cycling destroyed another category's read mark")
+	}
+
+	// And unmarking the category leaves the neighbour's mark in place too.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/read-category",
+		strings.NewReader(`{"category":"cycling","read":false}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/read-category (unmark) = %d", rec.Code)
+	}
+	if hn.store.ReadSet("2026-08-20")["c1"] {
+		t.Error("unmarking the category did not clear its own topics")
+	}
+	if !hn.store.ReadSet("2026-08-20")["f1"] {
+		t.Error("unmarking cycling wiped the whole day's read state")
+	}
+}
+
+func TestHomeListsCategoriesWithUnreadCounts(t *testing.T) {
+	hn := setup(t, goodResponse)
+	h := hn.srv.Handler()
+
+	saveDay(t, hn.store, "2026-08-20",
+		topic("c1", "cycling", "Old cycling"),
+		topic("n1", "news", "Old news"))
+	saveDay(t, hn.store, "2026-08-21", topic("c2", "cycling", "New cycling"))
+	hn.store.SetRead("2026-08-20", "c1", true)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `href="/c/cycling"`) || !strings.Contains(body, `href="/c/news"`) {
+		t.Error("home does not link to both standing feeds")
+	}
+	// cycling: 2 topics, 1 read -> 1 unread. The count is across days.
+	if !strings.Contains(body, `<span class="cat-count">1</span>`) {
+		t.Errorf("home is missing the cycling unread count")
+	}
+	// "cycling" is not in this config at all — it only exists in stored
+	// digests. Its topics must stay reachable rather than being orphaned.
+	if !strings.Contains(body, `href="/c/cycling"`) {
+		t.Error("a category left over from an older config was orphaned")
+	}
+}
+
+// A category with a space has to survive the round trip into a URL and back.
+func TestCategoryWithSpaceRoundTrips(t *testing.T) {
+	hn := setup(t, goodResponse)
+	h := hn.srv.Handler()
+
+	saveDay(t, hn.store, hn.date, topic("p1", "general aviation", "Emissions target moved"))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/general%20aviation", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /c/general%%20aviation = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Emissions target moved") {
+		t.Error("escaped category did not resolve back to its feed")
+	}
+}
+
+func TestUnknownCategoryRendersEmptyRatherThanFailing(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	rec := httptest.NewRecorder()
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/nosuchcategory", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /c/nosuchcategory = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Nothing briefed into") {
+		t.Error("empty category feed is missing its explanation")
 	}
 }
 

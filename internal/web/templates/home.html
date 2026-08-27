@@ -1,0 +1,38 @@
+{{define "home.html"}}<!doctype html>
+<html lang="en">
+<head>{{template "head" .}}</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+    <div class="topbar-title">
+      <h1>Digest</h1>
+      <p class="meta">{{.TotalUnread}} unread</p>
+    </div>
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+  </div>
+</header>
+
+<main>
+  <ul class="cats">
+    {{range .Categories}}
+    <li>
+      <a class="cat {{if not .Unread}}is-clear{{end}}" href="{{catURL .Name}}">
+        <span class="cat-name">{{.Name}}</span>
+        <span class="cat-count">{{.Unread}}</span>
+        <span class="cat-arrow" aria-hidden="true">›</span>
+      </a>
+    </li>
+    {{end}}
+  </ul>
+
+  {{if .LatestDate}}
+  <p class="alldays"><a href="/d/{{.LatestDate}}">Everything from {{shortDate .LatestDate}} in one brief ›</a></p>
+  {{end}}
+</main>
+
+{{template "footer-nav" .}}
+</body>
+</html>
+{{end}}
