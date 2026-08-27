@@ -74,8 +74,8 @@ news, whatever.
 ## On your phone
 
 Open the site in Safari or Chrome and use **Add to Home Screen**. It runs
-full-screen with its own icon, follows your light/dark setting, and respects the
-notch.
+full-screen with its own icon and respects the notch. The design is
+black-on-white by choice and stays that way regardless of your device theme.
 
 - **Tap a topic** to mark it read — it dims, and the unread count drops.
 - **Hide read** collapses what you've already seen. The setting sticks per device.
