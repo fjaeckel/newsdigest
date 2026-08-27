@@ -1,0 +1,7 @@
+data/
+config/feeds.yaml
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/

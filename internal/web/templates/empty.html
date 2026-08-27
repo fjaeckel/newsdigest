@@ -1,0 +1,30 @@
+{{define "empty.html"}}<!doctype html>
+<html lang="en">
+<head>{{template "head" .}}</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+    <div class="topbar-title"><h1>News digest</h1></div>
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+  </div>
+  <div class="topbar-actions">
+    <button type="button" id="refresh" class="chip" {{if .Generating}}disabled{{end}}>
+      {{if .Generating}}Building your first digest…{{else}}Build one now{{end}}
+    </button>
+  </div>
+</header>
+
+<main>
+  <p class="notice">
+    No digest has been generated yet. The next one runs automatically at the time
+    set in <code>config/feeds.yaml</code> — or tap <em>Build one now</em> to see it immediately.
+  </p>
+</main>
+
+{{template "footer-nav" .}}
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

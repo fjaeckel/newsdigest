@@ -1,0 +1,62 @@
+# Copy to config/feeds.yaml and edit. That's the only file you need to touch.
+
+# Everything time-related happens in this timezone.
+timezone: Europe/Berlin
+
+# When the digest is generated, 24h clock.
+run_at: "08:00"
+
+# How far back to look for articles. Slightly more than 24h so nothing
+# published just before yesterday's run slips through the cracks.
+lookback_hours: 26
+
+# Safety rails so one chatty feed can't dominate the brief or the token bill.
+max_items_per_feed: 40
+max_items_total: 250
+
+# Upper bound on topics. Claude merges aggressively to stay under it.
+max_topics: 12
+
+# Language of the brief, regardless of what language the sources are in.
+language: English
+
+# effort: low | medium | high | xhigh | max — how hard Claude thinks about it.
+model: claude-opus-5
+effort: medium
+
+exclude:
+  # Free-text rules handed to Claude. Add anything you never want to read.
+  topics:
+    - Sports of any kind — matches, results, transfers, athletes, leagues,
+      tournaments, doping, club finances, Olympics, motorsport, esports.
+
+  # Cheap local pre-filter, applied before Claude sees anything, which saves
+  # tokens. Case-insensitive substring match on title and summary.
+  # Keep it conservative — Claude is the real filter, this is just the bouncer.
+  keywords:
+    - bundesliga
+    - premier league
+    - champions league
+    - nfl
+    - nba
+    - fifa
+    - uefa
+    - formula 1
+    - wimbledon
+    - olympics
+    - super bowl
+    - world cup
+    - transfer window
+    - quarterback
+
+feeds:
+  - name: Tagesschau
+    url: https://www.tagesschau.de/index~rss2.xml
+  - name: Heise
+    url: https://www.heise.de/rss/heise-atom.xml
+  - name: The Guardian — World
+    url: https://www.theguardian.com/world/rss
+  - name: Ars Technica
+    url: https://feeds.arstechnica.com/arstechnica/index
+  - name: Hacker News
+    url: https://hnrss.org/frontpage

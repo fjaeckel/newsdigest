@@ -1,0 +1,28 @@
+{{define "archive.html"}}<!doctype html>
+<html lang="en">
+<head>{{template "head" .}}</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <a class="nav-btn" href="/" aria-label="Back">‹</a>
+    <div class="topbar-title"><h1>Archive</h1></div>
+    <span class="nav-btn disabled" aria-hidden="true"></span>
+  </div>
+</header>
+
+<main>
+  {{if not .Dates}}
+    <p class="notice">No digests yet.</p>
+  {{end}}
+  <ul class="archive">
+    {{range .Dates}}
+    <li><a href="/d/{{.}}"><span>{{shortDate .}}</span><span class="src-host">{{.}}</span></a></li>
+    {{end}}
+  </ul>
+</main>
+
+{{template "footer-nav" .}}
+</body>
+</html>
+{{end}}

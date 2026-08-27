@@ -1,0 +1,73 @@
+{{define "digest.html"}}<!doctype html>
+<html lang="en">
+<head>{{template "head" .}}</head>
+<body data-date="{{.Digest.Date}}">
+
+<header class="topbar">
+  <div class="topbar-row">
+    <a class="nav-btn {{if not .PrevDate}}disabled{{end}}"
+       {{if .PrevDate}}href="/d/{{.PrevDate}}"{{end}} aria-label="Previous day">‹</a>
+    <div class="topbar-title">
+      <h1>{{prettyDate .Digest.Date}}</h1>
+      <p class="meta"><span id="unread-count">{{.UnreadCount}}</span> unread of {{len .Digest.Topics}}</p>
+    </div>
+    <a class="nav-btn {{if not .NextDate}}disabled{{end}}"
+       {{if .NextDate}}href="/d/{{.NextDate}}"{{end}} aria-label="Next day">›</a>
+  </div>
+  <div class="topbar-actions">
+    <button type="button" id="toggle-read" class="chip" aria-pressed="false">Hide read</button>
+    <button type="button" id="mark-all" class="chip">Mark all read</button>
+    <button type="button" id="refresh" class="chip" {{if .Generating}}disabled{{end}}>
+      {{if .Generating}}Refreshing…{{else}}Refresh{{end}}
+    </button>
+  </div>
+</header>
+
+<main>
+  {{if not .Digest.Topics}}
+    <p class="notice">Nothing to report from your feeds for this day.</p>
+  {{end}}
+
+  <ul class="topics">
+    {{range .Digest.Topics}}
+    <li class="topic {{if index $.Read .ID}}is-read{{end}} {{if .Important}}is-important{{end}}"
+        data-id="{{.ID}}">
+      <button type="button" class="topic-main" aria-label="Toggle read">
+        <div class="topic-head">
+          {{if .Tag}}<span class="tag">{{.Tag}}</span>{{end}}
+          <span class="dot" aria-hidden="true"></span>
+        </div>
+        <h2>{{.Headline}}</h2>
+        <p class="summary">{{.Summary}}</p>
+      </button>
+      {{if .Sources}}
+      <ul class="sources">
+        {{range .Sources}}
+        <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}<span class="src-host">{{host .URL}}</span></a></li>
+        {{end}}
+      </ul>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+
+  <details class="debug">
+    <summary>Run details</summary>
+    <p>
+      {{.Digest.Stats.Feeds}} feeds read, {{.Digest.Stats.Items}} articles considered,
+      {{.Digest.Stats.FilteredOut}} pre-filtered, {{.Digest.Stats.Topics}} topics.
+      Generated {{.Digest.GeneratedAt.Format "15:04"}} in {{.Digest.Stats.DurationSecs}}s
+      by {{.Digest.Model}} ({{.Digest.Backend}}).
+    </p>
+    {{if .Digest.Errors}}
+    <p class="errors">Feeds that failed:</p>
+    <ul class="errors">{{range .Digest.Errors}}<li>{{.}}</li>{{end}}</ul>
+    {{end}}
+  </details>
+</main>
+
+{{template "footer-nav" .}}
+<script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}
