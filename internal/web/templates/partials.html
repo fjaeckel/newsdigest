@@ -34,27 +34,34 @@
     <h2>{{.Topic.Headline}}</h2>
     <p class="summary">{{.Topic.Summary}}</p>
   </button>
-  {{with groupSources .Topic.Sources}}
-  <ul class="sources">
-    {{range .}}
-      {{if eq (len .Articles) 1}}
-        {{with index .Articles 0}}
-    <li><a class="src" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}</a></li>
-        {{end}}
-      {{else}}
-    <li class="src-group">
-      <details>
-        <summary class="src">{{.Feed}}<span class="src-count">{{len .Articles}}</span></summary>
-        <ul class="src-list">
-          {{range .Articles}}
-          <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></li>
-          {{end}}
-        </ul>
-      </details>
-    </li>
-      {{end}}
-    {{end}}
-  </ul>
-  {{end}}
+  {{template "source-chips" (groupSources .Topic.Sources)}}
 </li>
+{{end}}
+
+{{/* One chip per outlet, from a []GroupedSource. Shared by a topic card and by
+     a paragraph of the front page, which shows the outlets behind the topics it
+     was written from. */}}
+{{define "source-chips"}}
+{{with .}}
+<ul class="sources">
+  {{range .}}
+    {{if eq (len .Articles) 1}}
+      {{with index .Articles 0}}
+  <li><a class="src" href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Feed}}</a></li>
+      {{end}}
+    {{else}}
+  <li class="src-group">
+    <details>
+      <summary class="src">{{.Feed}}<span class="src-count">{{len .Articles}}</span></summary>
+      <ul class="src-list">
+        {{range .Articles}}
+        <li><a href="{{.URL}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></li>
+        {{end}}
+      </ul>
+    </details>
+  </li>
+    {{end}}
+  {{end}}
+</ul>
+{{end}}
 {{end}}

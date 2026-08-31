@@ -12,14 +12,43 @@
     </div>
     <span class="nav-btn disabled" aria-hidden="true"></span>
   </div>
+  <div class="topbar-actions">
+    <button type="button" id="refresh" class="chip" {{if .Generating}}disabled{{end}}>
+      {{if .Generating}}Refreshing…{{else}}Refresh{{end}}
+    </button>
+  </div>
 </header>
 
 <main>
+  {{if .Brief}}
+  <section class="brief">
+    <div class="masthead">
+      <h2>Today's top stories</h2>
+      <p class="masthead-sub">{{prettyDate .LatestDate}}</p>
+    </div>
+
+    <ul class="leads">
+      {{range .Brief}}
+      <li class="lead">
+        <p><span class="lead-mark" aria-hidden="true">▸</span><b>{{.Lead}}</b> {{.Text}}</p>
+        {{template "source-chips" .Sources}}
+      </li>
+      {{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{/* Not "everything else": the brief above is a skim of these same feeds,
+       not a separate set of stories, and every one of them is still down here
+       waiting to be read. */}}
+  <h2 class="section-head">Your feeds</h2>
+
   <ul class="cats">
     {{range .Categories}}
     <li>
       <a class="cat {{if not .Unread}}is-clear{{end}}" href="{{catURL .Name}}">
         <span class="cat-name">{{.Name}}</span>
+        {{if eq .Mode "complete"}}<span class="cat-mode" title="Every article, nothing dropped">all</span>{{end}}
         <span class="cat-count">{{.Unread}}</span>
         <span class="cat-arrow" aria-hidden="true">›</span>
       </a>
@@ -33,6 +62,7 @@
 </main>
 
 {{template "footer-nav" .}}
+<script src="/static/app.js"></script>
 </body>
 </html>
 {{end}}

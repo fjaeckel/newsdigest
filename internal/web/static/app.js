@@ -118,16 +118,19 @@
   // tapping it. Remembered per device.
 
   var srcToggle = document.getElementById("toggle-sources");
-  if (srcToggle) {
-    var groups = document.querySelectorAll(".src-group details");
+  var groups = document.querySelectorAll(".src-group details");
 
+  // The preference is applied wherever grouped sources appear, including the
+  // front page, which shows them but carries no toggle of its own.
+  var fanned = localStorage.getItem("expandSources") === "1";
+  applySources(fanned);
+
+  if (srcToggle) {
     if (!groups.length) {
       // Nothing to fan out today - don't offer a control that does nothing.
       srcToggle.remove();
+      srcToggle = null;
     } else {
-      var fanned = localStorage.getItem("expandSources") === "1";
-      applySources(fanned);
-
       srcToggle.addEventListener("click", function () {
         fanned = !fanned;
         localStorage.setItem("expandSources", fanned ? "1" : "0");
@@ -140,6 +143,7 @@
     document.querySelectorAll(".src-group details").forEach(function (d) {
       d.open = on;
     });
+    if (!srcToggle) return;
     srcToggle.setAttribute("aria-pressed", on ? "true" : "false");
     srcToggle.textContent = on ? "Collapse sources" : "Expand sources";
   }

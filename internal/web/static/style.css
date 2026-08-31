@@ -111,6 +111,57 @@ main { padding: 12px 16px 24px; max-width: 720px; margin: 0 auto; }
 
 .chip:disabled { opacity: 0.5; cursor: default; }
 
+/* --- home: the front page brief --- */
+
+/* The brief is prose, not cards: it is meant to be read straight down in one
+   pass, which is the whole appeal of the form it borrows. Serif, because it
+   reads as an edited page rather than a list of notifications. */
+
+.masthead { text-align: center; padding: 4px 0 14px; }
+
+.masthead h2 {
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.masthead-sub { margin: 3px 0 0; font-size: 12.5px; color: var(--text-dim); }
+
+.leads { list-style: none; margin: 0; padding: 0; }
+
+.lead { padding: 0 0 14px; }
+
+.lead + .lead { border-top: 1px solid var(--border); padding-top: 14px; }
+
+.lead p {
+  margin: 0;
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.52;
+  letter-spacing: -0.003em;
+}
+
+.lead-mark { margin-right: 5px; font-size: 12px; vertical-align: 1px; }
+
+.lead b { font-weight: 700; }
+
+/* Sources under a paragraph are a way back to the articles, not the point of
+   it, so they sit closer and lighter than a topic card's. */
+.lead .sources { padding: 8px 0 0; }
+
+.section-head {
+  margin: 26px 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.brief + .section-head { border-top: 1px solid var(--border); padding-top: 18px; }
+
 /* --- home: the standing feeds --- */
 
 .cats { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -152,6 +203,19 @@ main { padding: 12px 16px 24px; max-width: 720px; margin: 0 auto; }
 
 .cat-arrow { color: var(--text-dim); font-size: 20px; line-height: 1; }
 
+/* Marks a feed that is briefed in full rather than edited down, so it is clear
+   why one list is long and another is short. */
+.cat-mode {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
 /* A feed with nothing waiting recedes rather than disappearing. */
 .cat.is-clear .cat-name { font-weight: 500; color: var(--text-dim); }
 .cat.is-clear .cat-count { color: var(--text-dim); background: var(--accent-soft); }
@@ -174,11 +238,26 @@ main { padding: 12px 16px 24px; max-width: 720px; margin: 0 auto; }
 
 .day-head a { color: inherit; text-decoration: none; }
 
+/* Outlet headings, for a feed read source by source rather than by
+   importance. Lighter than the day above them so the hierarchy stays obvious
+   on a small screen. */
+.outlet + .outlet { margin-top: 14px; }
+
+.feed-head {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
 /* With read topics hidden, a day whose topics have all been read would leave
-   its heading stranded above nothing, so the whole day goes. The day needs to
-   be a wrapper element: :has() may not be nested inside a :not() that is
-   itself inside a :has(), which makes the sibling-combinator form invalid. */
-body.hide-read .day:not(:has(.topic:not(.is-read))) {
+   its heading stranded above nothing, so the whole day goes. Same for an
+   outlet section within a day. The day needs to be a wrapper element: :has()
+   may not be nested inside a :not() that is itself inside a :has(), which
+   makes the sibling-combinator form invalid. */
+body.hide-read .day:not(:has(.topic:not(.is-read))),
+body.hide-read .outlet:not(:has(.topic:not(.is-read))) {
   display: none;
 }
 
@@ -350,7 +429,8 @@ summary.src::-webkit-details-marker { display: none; }
 .debug { margin-top: 22px; font-size: 12.5px; color: var(--text-dim); }
 .debug summary { cursor: pointer; padding: 6px 0; }
 .debug p, .debug li { margin: 4px 0; }
-.debug ul.errors { padding-left: 16px; list-style: disc; }
+.debug ul.errors, .debug ul.coverage { padding-left: 16px; list-style: disc; }
+.debug ul.coverage { margin: 8px 0; }
 
 .footnav {
   position: fixed;

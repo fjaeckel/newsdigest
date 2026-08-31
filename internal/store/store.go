@@ -46,15 +46,40 @@ type Stats struct {
 	DurationSecs int `json:"duration_secs"`
 }
 
+// CategoryStat is the per-category audit trail. Covered against Items is the
+// number that matters for a complete category: it is the claim that nothing
+// was missed, stated rather than assumed.
+type CategoryStat struct {
+	Name     string `json:"name"`
+	Mode     string `json:"mode"`
+	Items    int    `json:"items"`
+	Topics   int    `json:"topics"`
+	Covered  int    `json:"covered"`  // items referenced by at least one topic
+	Excluded int    `json:"excluded"` // items the model dropped under an exclude rule
+	Rescued  int    `json:"rescued"`  // items it silently lost, added back as their own topics
+}
+
+// BriefStory is one paragraph of the cross-category front page, in the shape
+// The Economist's World in Brief uses: a bolded subject, then the sentence that
+// subject starts. TopicIDs are the topics it was written from, which is what
+// lets the page show real sources under a paragraph the model wrote.
+type BriefStory struct {
+	Lead     string   `json:"lead"`
+	Text     string   `json:"text"`
+	TopicIDs []string `json:"topic_ids"`
+}
+
 // Digest is one morning's brief.
 type Digest struct {
-	Date        string    `json:"date"` // YYYY-MM-DD in the configured timezone
-	GeneratedAt time.Time `json:"generated_at"`
-	Model       string    `json:"model"`
-	Backend     string    `json:"backend"`
-	Stats       Stats     `json:"stats"`
-	Topics      []Topic   `json:"topics"`
-	Errors      []string  `json:"errors,omitempty"`
+	Date        string         `json:"date"` // YYYY-MM-DD in the configured timezone
+	GeneratedAt time.Time      `json:"generated_at"`
+	Model       string         `json:"model"`
+	Backend     string         `json:"backend"`
+	Stats       Stats          `json:"stats"`
+	Categories  []CategoryStat `json:"categories,omitempty"`
+	Brief       []BriefStory   `json:"brief,omitempty"`
+	Topics      []Topic        `json:"topics"`
+	Errors      []string       `json:"errors,omitempty"`
 }
 
 var dateRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)

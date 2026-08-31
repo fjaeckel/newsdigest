@@ -7,7 +7,7 @@
   <div class="topbar-row">
     <a class="nav-btn" href="/" aria-label="All feeds">‹</a>
     <div class="topbar-title">
-      <h1>{{.Category}}</h1>
+      <h1>{{.Category}}{{if eq .Mode "complete"}} <span class="cat-mode">all</span>{{end}}</h1>
       <p class="meta"><span id="unread-count">{{.UnreadCount}}</span> unread of {{.Total}}</p>
     </div>
     <span class="nav-btn disabled" aria-hidden="true"></span>
@@ -27,9 +27,20 @@
   {{range $day := .Days}}
   <section class="day">
     <h2 class="day-head"><a href="/d/{{$day.Date}}">{{prettyDate $day.Date}}</a></h2>
+    {{if $day.Feeds}}
+      {{range $day.Feeds}}
+      <section class="outlet">
+        <h3 class="feed-head">{{.Feed}}</h3>
+        <ul class="topics">
+          {{range .Cards}}{{template "topic-card" .}}{{end}}
+        </ul>
+      </section>
+      {{end}}
+    {{else}}
     <ul class="topics">
       {{range $day.Cards}}{{template "topic-card" .}}{{end}}
     </ul>
+    {{end}}
   </section>
   {{end}}
 

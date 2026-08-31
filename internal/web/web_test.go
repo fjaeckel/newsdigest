@@ -20,16 +20,18 @@ import (
 	"github.com/fjaeckel/newsdigest/internal/store"
 )
 
-// stubBackend returns canned JSON so the tests never touch the network or the API.
+// stubBackend returns canned JSON so the tests never touch the network or the
+// API. Every request is kept: a run makes one call per category plus one for
+// the front page, so a test that wants the category prompt has to say which.
 type stubBackend struct {
 	response string
-	lastReq  claude.Request
+	reqs     []claude.Request
 }
 
 func (s *stubBackend) Name() string { return "stub" }
 
 func (s *stubBackend) Complete(_ context.Context, req claude.Request) (string, error) {
-	s.lastReq = req
+	s.reqs = append(s.reqs, req)
 	return s.response, nil
 }
 
@@ -51,6 +53,24 @@ func (b *countingBackend) Complete(_ context.Context, req claude.Request) (strin
 		return "", fmt.Errorf("backend exploded")
 	}
 	return b.response, nil
+}
+
+// scriptedBackend answers each call with the next response in the script and
+// repeats the last one after that, which is what lets a test drive a category
+// brief and the front page that follows it independently.
+type scriptedBackend struct {
+	script []string
+	calls  int
+	reqs   []claude.Request
+}
+
+func (b *scriptedBackend) Name() string { return "scripted" }
+
+func (b *scriptedBackend) Complete(_ context.Context, req claude.Request) (string, error) {
+	b.reqs = append(b.reqs, req)
+	i := min(b.calls, len(b.script)-1)
+	b.calls++
+	return b.script[i], nil
 }
 
 const feedXML = `<?xml version="1.0"?>
@@ -133,10 +153,11 @@ func TestGenerateAndRender(t *testing.T) {
 	srv, st, backend, date := h.srv, h.store, h.backend, h.date
 
 	// The sports item must be filtered out before Claude ever sees it.
-	if strings.Contains(strings.ToLower(backend.lastReq.User), "bundesliga") {
+	catReq := backend.reqs[0]
+	if strings.Contains(strings.ToLower(catReq.User), "bundesliga") {
 		t.Error("sports item reached the prompt despite the keyword filter")
 	}
-	if !strings.Contains(backend.lastReq.System, "Sports of any kind.") {
+	if !strings.Contains(catReq.System, "Sports of any kind.") {
 		t.Error("exclusion topic missing from the system prompt")
 	}
 
@@ -205,7 +226,7 @@ func TestEachCategoryIsBriefedSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cfg.Categories(); len(got) != 2 || got[0] != "news" || got[1] != "cycling" {
+	if got := cfg.CategoryNames(); len(got) != 2 || got[0] != "news" || got[1] != "cycling" {
 		t.Fatalf("categories should follow config order, got %v", got)
 	}
 
@@ -223,8 +244,13 @@ func TestEachCategoryIsBriefedSeparately(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 
-	if backend.calls != 2 {
-		t.Errorf("want one Claude call per category, got %d", backend.calls)
+	// One call per category, plus the one that writes the front page from what
+	// they produced.
+	if backend.calls != 3 {
+		t.Errorf("want one Claude call per category plus the front page, got %d", backend.calls)
+	}
+	if !strings.Contains(backend.systems[2], "front page") {
+		t.Error("the last call was not the front page brief")
 	}
 	if len(d.Topics) != 2 {
 		t.Fatalf("want a topic from each category, got %d", len(d.Topics))
@@ -464,6 +490,15 @@ func topic(id, cat, headline string) store.Topic {
 	}
 }
 
+// withFeed re-attributes a topic's sources to a named outlet, which is what
+// by-feed grouping keys on.
+func withFeed(t store.Topic, feed string) store.Topic {
+	for i := range t.Sources {
+		t.Sources[i].Feed = feed
+	}
+	return t
+}
+
 // The point of a standing feed: an unread topic from days ago is still there,
 // alongside today's, until it is read.
 func TestCategoryFeedCarriesUnreadForward(t *testing.T) {
@@ -675,6 +710,379 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if res.Latest != hn.date {
 		t.Errorf("latest = %q, want %q", res.Latest, hn.date)
+	}
+}
+
+// --- complete categories ---
+
+// itemsFeed serves one item per title, newest first and an hour apart, so the
+// index a prompt sees is deterministic.
+func itemsFeed(t *testing.T, titles ...string) string {
+	t.Helper()
+
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0"?><rss version="2.0"><channel><title>Test Feed</title>`)
+	for i, title := range titles {
+		fmt.Fprintf(&b, `<item><title>%s</title><link>https://example.com/i%d</link>`+
+			`<description>Blurb %d.</description><pubDate>%s</pubDate></item>`,
+			title, i, i, time.Now().Add(-time.Duration(i)*time.Hour).UTC().Format(time.RFC1123Z))
+	}
+	b.WriteString(`</channel></rss>`)
+	body := b.String()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// completeSetup builds a one-category install in the given mode and runs it
+// against a scripted backend.
+func completeSetup(t *testing.T, mode string, script []string, titles ...string) (*store.Digest, *Server, *store.Store, string) {
+	t.Helper()
+
+	url := itemsFeed(t, titles...)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "feeds.yaml")
+	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+		"brief:\n  enabled: false\n" +
+		"categories:\n  aviation:\n    mode: " + mode + "\n" +
+		"feeds:\n  - name: Air Facts\n    category: aviation\n    url: " + url + "\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.New(filepath.Join(dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gen := &digest.Generator{Cfg: cfg, Store: st, Backend: &scriptedBackend{script: script}, Log: log}
+	srv, err := New(cfg, st, gen, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	date := time.Now().UTC().Format("2006-01-02")
+	d, err := gen.Run(context.Background(), date)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	return d, srv, st, date
+}
+
+// The point of a complete category: an article the model quietly failed to
+// mention is added back rather than lost. This is what "I don't want to miss
+// anything" has to mean in code — the guarantee cannot rest on the prompt.
+func TestCompleteCategoryCoversEveryArticle(t *testing.T) {
+	// The model writes up only the first of three items and excludes nothing.
+	resp := `{"topics":[{"headline":"New avionics rule","summary":"It changed.","tag":"rules",
+	  "importance":"high","source_indexes":[0]}],"excluded_indexes":[]}`
+
+	d, _, _, _ := completeSetup(t, "complete", []string{resp},
+		"New avionics rule", "Cessna price drop", "Grass strip reopens")
+
+	if len(d.Topics) != 3 {
+		t.Fatalf("want every article accounted for, got %d topics: %+v", len(d.Topics), d.Topics)
+	}
+	headlines := map[string]bool{}
+	for _, tp := range d.Topics {
+		headlines[tp.Headline] = true
+	}
+	for _, want := range []string{"New avionics rule", "Cessna price drop", "Grass strip reopens"} {
+		if !headlines[want] {
+			t.Errorf("article %q was dropped by a category that promised not to", want)
+		}
+	}
+
+	if len(d.Categories) != 1 {
+		t.Fatalf("want one category stat, got %+v", d.Categories)
+	}
+	stat := d.Categories[0]
+	if stat.Mode != "complete" || stat.Items != 3 || stat.Covered != 3 || stat.Rescued != 2 {
+		t.Errorf("coverage stat does not describe what happened: %+v", stat)
+	}
+
+	// A rescued article keeps the feed's own headline, link and blurb - nothing
+	// about it is invented.
+	for _, tp := range d.Topics {
+		if tp.Headline != "Cessna price drop" {
+			continue
+		}
+		if len(tp.Sources) != 1 || tp.Sources[0].URL != "https://example.com/i1" {
+			t.Errorf("rescued topic lost its real source: %+v", tp.Sources)
+		}
+		if tp.Summary != "Blurb 1." {
+			t.Errorf("rescued summary = %q, want the feed's own blurb", tp.Summary)
+		}
+	}
+}
+
+// Rescuing everything unmentioned would make exclusions impossible, so a
+// complete category names what it drops and those items stay dropped.
+func TestCompleteCategoryHonoursDeliberateExclusions(t *testing.T) {
+	resp := `{"topics":[{"headline":"New avionics rule","summary":"It changed.","tag":"rules",
+	  "importance":"normal","source_indexes":[0]}],"excluded_indexes":[1]}`
+
+	d, _, _, _ := completeSetup(t, "complete", []string{resp},
+		"New avionics rule", "Sponsored: buy a headset", "Grass strip reopens")
+
+	for _, tp := range d.Topics {
+		if strings.Contains(tp.Headline, "Sponsored") {
+			t.Error("an item the model deliberately excluded was rescued anyway")
+		}
+	}
+	if len(d.Topics) != 2 {
+		t.Fatalf("want the excluded item gone and the lost one back, got %d", len(d.Topics))
+	}
+	if got := d.Categories[0]; got.Excluded != 1 || got.Rescued != 1 {
+		t.Errorf("stat does not separate a deliberate drop from a lost item: %+v", got)
+	}
+}
+
+// A brief category is a selection, so an item the model passed over stays
+// passed over. Rescuing there would defeat the point of max_topics.
+func TestBriefCategoryLeavesUnusedItemsOut(t *testing.T) {
+	resp := `{"topics":[{"headline":"The one that mattered","summary":"It did.","tag":"rules",
+	  "importance":"high","source_indexes":[0]}],"excluded_indexes":[]}`
+
+	d, _, _, _ := completeSetup(t, "brief", []string{resp},
+		"The one that mattered", "Minor item", "Another minor item")
+
+	if len(d.Topics) != 1 {
+		t.Fatalf("a brief must be allowed to leave things out, got %d topics", len(d.Topics))
+	}
+	if got := d.Categories[0]; got.Rescued != 0 || got.Covered != 1 || got.Items != 3 {
+		t.Errorf("brief stat = %+v", got)
+	}
+}
+
+// The two modes are told to do opposite things, and the prompt has to say so.
+func TestCompleteAndBriefGetDifferentInstructions(t *testing.T) {
+	for _, tc := range []struct {
+		mode, want, unwanted string
+	}{
+		{"complete", "exactly one topic", "at most 5 topics"},
+		{"brief", "at most 5 topics", "exactly one topic"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			url := itemsFeed(t, "An item")
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "feeds.yaml")
+			cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+				"brief:\n  enabled: false\n" +
+				"categories:\n  aviation:\n    mode: " + tc.mode + "\n" +
+				"feeds:\n  - name: Air Facts\n    category: aviation\n    url: " + url + "\n"
+			os.WriteFile(cfgPath, []byte(cfgYAML), 0o644)
+
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, _ := store.New(filepath.Join(dir, "data"))
+			backend := &scriptedBackend{script: []string{`{"topics":[],"excluded_indexes":[]}`}}
+			gen := &digest.Generator{Cfg: cfg, Store: st, Backend: backend,
+				Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if _, err := gen.Run(context.Background(), time.Now().UTC().Format("2006-01-02")); err != nil {
+				t.Fatal(err)
+			}
+
+			sys := backend.reqs[0].System
+			if !strings.Contains(sys, tc.want) {
+				t.Errorf("%s prompt is missing %q", tc.mode, tc.want)
+			}
+			if strings.Contains(sys, tc.unwanted) {
+				t.Errorf("%s prompt carries the other mode's rule %q", tc.mode, tc.unwanted)
+			}
+		})
+	}
+}
+
+// A complete category reads outlet by outlet, and the outlets follow the order
+// they were written down in the config.
+func TestCategoryGroupedByFeed(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "feeds.yaml")
+	url := itemsFeed(t, "Something")
+	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+		"brief:\n  enabled: false\n" +
+		"categories:\n  aviation:\n    mode: complete\n" +
+		"feeds:\n" +
+		"  - name: ForeFlight\n    category: aviation\n    url: " + url + "\n" +
+		"  - name: Air Facts\n    category: aviation\n    url: " + url + "\n"
+	os.WriteFile(cfgPath, []byte(cfgYAML), 0o644)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := store.New(filepath.Join(dir, "data"))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gen := &digest.Generator{Cfg: cfg, Store: st, Backend: &stubBackend{}, Log: log}
+	srv, err := New(cfg, st, gen, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Air Facts is second in the config, so it must render second even though
+	// its story is listed first.
+	saveDay(t, st, "2026-08-21",
+		withFeed(topic("a1", "aviation", "Air Facts story"), "Air Facts"),
+		withFeed(topic("f1", "aviation", "ForeFlight story"), "ForeFlight"))
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/aviation", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{`<h3 class="feed-head">ForeFlight</h3>`, `<h3 class="feed-head">Air Facts</h3>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("by-feed grouping is missing %q", want)
+		}
+	}
+	if strings.Index(body, "Air Facts</h3>") < strings.Index(body, "ForeFlight</h3>") {
+		t.Error("outlets are not in config order")
+	}
+	// Every story is still there, under exactly one outlet.
+	for _, want := range []string{"<h2>Air Facts story</h2>", "<h2>ForeFlight story</h2>"} {
+		if n := strings.Count(body, want); n != 1 {
+			t.Errorf("%q appears %d times, want once", want, n)
+		}
+	}
+}
+
+// A category briefed the old way keeps its flat, importance-ordered list.
+func TestBriefCategoryIsNotGroupedByFeed(t *testing.T) {
+	hn := setup(t, goodResponse)
+	saveDay(t, hn.store, "2026-08-21", topic("n1", "news", "A news story"))
+
+	rec := httptest.NewRecorder()
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/c/news", nil))
+	if strings.Contains(rec.Body.String(), "feed-head") {
+		t.Error("a brief category was grouped by outlet")
+	}
+}
+
+// --- the front page ---
+
+func TestFrontPageBriefRendersOnHome(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	d, _ := hn.store.LoadDigest(hn.date)
+	d.Brief = []store.BriefStory{{
+		Lead:     "America",
+		Text:     "struck two rocket launchers near the strait.",
+		TopicIDs: []string{d.Topics[0].ID},
+	}, {
+		Lead:     "Shimano",
+		Text:     "announced a wireless groupset.",
+		TopicIDs: []string{"gone-since-the-day-was-regenerated"},
+	}}
+	if err := hn.store.SaveDigest(d); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d", rec.Code)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "<b>America</b> struck two rocket launchers near the strait.") {
+		t.Error("the lead and its sentence are not rendered as one line")
+	}
+	// The sources under a paragraph come from the topics it cited, so they are
+	// real links from the feed rather than anything the model wrote.
+	if !strings.Contains(body, "https://example.com/bridge") {
+		t.Error("front page paragraph is missing the sources behind it")
+	}
+	// A paragraph whose topics are gone still reads; it just has no chips.
+	if !strings.Contains(body, "<b>Shimano</b> announced a wireless groupset.") {
+		t.Error("a paragraph citing a vanished topic was dropped instead of degrading")
+	}
+	// The drill-down is still there underneath.
+	if !strings.Contains(body, `href="/c/news"`) {
+		t.Error("front page swallowed the standing feeds")
+	}
+}
+
+// A digest from before the front page existed must still render a home screen.
+func TestHomeWithoutABriefStillWorks(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	rec := httptest.NewRecorder()
+	hn.srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET / = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Your feeds") {
+		t.Error("with no brief, the feed list should still be headed")
+	}
+}
+
+// The front page is written from finished topics, never from the raw feed, so
+// it cannot report anything a category did not.
+func TestFrontPageSeesOnlyBriefedTopics(t *testing.T) {
+	h := setup(t, goodResponse)
+
+	front := h.backend.reqs[len(h.backend.reqs)-1]
+	if !strings.Contains(front.System, "front page") {
+		t.Fatalf("last call was not the front page: %.120q", front.System)
+	}
+	if !strings.Contains(front.User, "New bridge approved") {
+		t.Error("front page prompt is missing the topics it should draw on")
+	}
+	if strings.Contains(front.User, "Council approves the new bridge") {
+		t.Error("front page was handed raw feed items rather than briefed topics")
+	}
+}
+
+// Losing the front page costs a nice-to-have, not the morning's categories.
+func TestFrontPageFailureKeepsTheCategories(t *testing.T) {
+	url := itemsFeed(t, "A story")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "feeds.yaml")
+	cfgYAML := "timezone: UTC\nrun_at: \"08:00\"\nmodel: claude-opus-5\neffort: medium\nmax_topics: 5\n" +
+		"feeds:\n  - name: News Feed\n    category: news\n    url: " + url + "\n"
+	os.WriteFile(cfgPath, []byte(cfgYAML), 0o644)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := store.New(filepath.Join(dir, "data"))
+	// The category call succeeds; the front page call gets nonsense back.
+	backend := &scriptedBackend{script: []string{
+		`{"topics":[{"headline":"A story","summary":"x","tag":"t","importance":"normal","source_indexes":[0]}],"excluded_indexes":[]}`,
+		`not json at all`,
+	}}
+	gen := &digest.Generator{Cfg: cfg, Store: st, Backend: backend,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	d, err := gen.Run(context.Background(), time.Now().UTC().Format("2006-01-02"))
+	if err != nil {
+		t.Fatalf("a failed front page took down the run: %v", err)
+	}
+	if len(d.Topics) != 1 {
+		t.Errorf("want the category's topic to survive, got %d", len(d.Topics))
+	}
+	if len(d.Brief) != 0 {
+		t.Errorf("want no front page, got %+v", d.Brief)
+	}
+	var mentioned bool
+	for _, e := range d.Errors {
+		if strings.Contains(e, "front page") {
+			mentioned = true
+		}
+	}
+	if !mentioned {
+		t.Errorf("the front page failure was not recorded: %v", d.Errors)
 	}
 }
 

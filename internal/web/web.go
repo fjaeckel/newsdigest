@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -162,12 +163,15 @@ type pageData struct {
 	Categories  []CategoryLink
 	TotalUnread int
 	LatestDate  string
+	Brief       []BriefCard
 
 	// Set on a category feed only.
-	Category string
-	Days     []FeedDay
-	Total    int
-	Capped   bool
+	Category    string
+	Days        []FeedDay
+	Total       int
+	Capped      bool
+	GroupByFeed bool
+	Mode        string
 }
 
 // CategoryLink is one standing feed on the home screen.
@@ -175,11 +179,32 @@ type CategoryLink struct {
 	Name   string
 	Unread int
 	Total  int
+	Mode   string
+}
+
+// BriefCard is one paragraph of the front page. The prose is the model's, but
+// the outlets under it are resolved from the topics it cited, so a paragraph
+// always leads back to real articles.
+type BriefCard struct {
+	Lead     string
+	Text     string
+	Category string
+	Sources  []GroupedSource
 }
 
 // FeedDay groups a category feed's topics under the day they were briefed.
+// Cards and Feeds are alternatives: a category grouped by importance fills the
+// first, one grouped by outlet fills the second.
 type FeedDay struct {
 	Date  string
+	Cards []TopicCard
+	Feeds []FeedGroup
+}
+
+// FeedGroup is one outlet's topics within a day, for a category read source by
+// source rather than by importance.
+type FeedGroup struct {
+	Feed  string
 	Cards []TopicCard
 }
 
@@ -192,7 +217,10 @@ type TopicCard struct {
 	Date  string
 }
 
-// handleHome lists the standing feeds with what is still unread in each.
+// handleHome is the front page: this morning's cross-category brief, then the
+// standing feeds with what is still unread in each. The brief is the skim and
+// the feeds are the drill-down — nothing on the front page is the only place a
+// story appears, so it never has to be read to avoid missing something.
 func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	dates, err := s.Store.Dates()
 	if err != nil {
@@ -209,14 +237,18 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	var extra []string // categories present on disk but no longer in the config
 
 	known := map[string]bool{}
-	for _, c := range s.Cfg.Categories() {
+	for _, c := range s.Cfg.CategoryNames() {
 		known[c] = true
 	}
 
+	var latest *store.Digest // dates[0]'s digest, kept for the front page
 	for _, date := range dates {
 		d, err := s.Store.LoadDigest(date)
 		if err != nil || d == nil {
 			continue
+		}
+		if date == dates[0] {
+			latest = d
 		}
 		readSet := s.Store.ReadSet(date)
 		for _, t := range d.Topics {
@@ -238,18 +270,62 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 	// over from an older config so its topics stay reachable.
 	links := make([]CategoryLink, 0, len(total))
 	sum := 0
-	for _, cat := range append(s.Cfg.Categories(), extra...) {
-		links = append(links, CategoryLink{Name: cat, Unread: unread[cat], Total: total[cat]})
+	for _, cat := range append(s.Cfg.CategoryNames(), extra...) {
+		links = append(links, CategoryLink{
+			Name:   cat,
+			Unread: unread[cat],
+			Total:  total[cat],
+			Mode:   s.Cfg.CategoryOf(cat).Mode,
+		})
 		sum += unread[cat]
 	}
+
+	s.genMu.Lock()
+	generating := s.generating
+	s.genMu.Unlock()
 
 	s.render(w, "home.html", pageData{
 		Categories:  links,
 		TotalUnread: sum,
 		LatestDate:  dates[0],
+		Brief:       briefCards(latest),
 		Dates:       dates,
+		Generating:  generating,
 		Title:       "Digest",
 	})
+}
+
+// briefCards resolves each front-page paragraph's topic IDs back to the topics
+// they were written from, so the page can show the outlets behind the prose.
+// A digest written before the front page existed simply has none.
+func briefCards(d *store.Digest) []BriefCard {
+	if d == nil || len(d.Brief) == 0 {
+		return nil
+	}
+
+	byID := make(map[string]store.Topic, len(d.Topics))
+	for _, t := range d.Topics {
+		byID[t.ID] = t
+	}
+
+	cards := make([]BriefCard, 0, len(d.Brief))
+	for _, story := range d.Brief {
+		card := BriefCard{Lead: story.Lead, Text: story.Text}
+		var sources []store.Source
+		for _, id := range story.TopicIDs {
+			t, ok := byID[id]
+			if !ok {
+				continue // the day was regenerated and this topic is gone
+			}
+			if card.Category == "" {
+				card.Category = topicCategory(t)
+			}
+			sources = append(sources, t.Sources...)
+		}
+		card.Sources = groupSources(sources)
+		cards = append(cards, card)
+	}
+	return cards
 }
 
 func (s *Server) handleDigest(w http.ResponseWriter, r *http.Request) {
@@ -335,6 +411,10 @@ func (s *Server) handleCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings := s.Cfg.CategoryOf(cat)
+	byFeed := settings.GroupBy == config.GroupByFeed
+	order := s.Cfg.FeedOrder(cat)
+
 	var (
 		days     []FeedDay
 		rendered int
@@ -366,9 +446,16 @@ func (s *Server) handleCategory(w http.ResponseWriter, r *http.Request) {
 			cards = append(cards, TopicCard{Topic: t, Read: readSet[t.ID], Date: date})
 			rendered++
 		}
-		if len(cards) > 0 {
-			days = append(days, FeedDay{Date: date, Cards: cards})
+		if len(cards) == 0 {
+			continue
 		}
+		day := FeedDay{Date: date}
+		if byFeed {
+			day.Feeds = groupByFeed(cards, order)
+		} else {
+			day.Cards = cards
+		}
+		days = append(days, day)
 	}
 
 	s.render(w, "category.html", pageData{
@@ -378,8 +465,44 @@ func (s *Server) handleCategory(w http.ResponseWriter, r *http.Request) {
 		Total:       total,
 		UnreadCount: unread,
 		Capped:      capped,
+		GroupByFeed: byFeed,
+		Mode:        settings.Mode,
 		Title:       cat,
 	})
+}
+
+// groupByFeed sorts a day's topics into one section per outlet. A topic that
+// merged several outlets belongs under the first one it cites, so it appears
+// exactly once — the other outlets are still on its own source chips. order
+// puts the sections in config order; anything not in the config (an outlet
+// renamed since, say) sorts to the end rather than vanishing.
+func groupByFeed(cards []TopicCard, order map[string]int) []FeedGroup {
+	var groups []FeedGroup
+	at := map[string]int{}
+
+	for _, c := range cards {
+		feed := "Other"
+		if len(c.Topic.Sources) > 0 && c.Topic.Sources[0].Feed != "" {
+			feed = c.Topic.Sources[0].Feed
+		}
+		if i, ok := at[feed]; ok {
+			groups[i].Cards = append(groups[i].Cards, c)
+			continue
+		}
+		at[feed] = len(groups)
+		groups = append(groups, FeedGroup{Feed: feed, Cards: []TopicCard{c}})
+	}
+
+	rank := func(feed string) int {
+		if i, ok := order[feed]; ok {
+			return i
+		}
+		return len(order) + 1
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return rank(groups[i].Feed) < rank(groups[j].Feed)
+	})
+	return groups
 }
 
 // topicCategory falls back for digests written before categories existed.

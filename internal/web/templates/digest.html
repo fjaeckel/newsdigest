@@ -41,6 +41,17 @@
       Generated {{.Digest.GeneratedAt.Format "15:04"}} in {{.Digest.Stats.DurationSecs}}s
       by {{.Digest.Model}} ({{.Digest.Backend}}).
     </p>
+    {{if .Digest.Categories}}
+    <ul class="coverage">
+      {{range .Digest.Categories}}
+      <li>
+        <b>{{.Name}}</b> ({{.Mode}}) — {{.Covered}} of {{.Items}} articles covered
+        in {{.Topics}} topics{{if .Excluded}}, {{.Excluded}} excluded{{end}}{{if .Rescued}},
+        {{.Rescued}} added back unsummarised{{end}}.
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
     {{if .Digest.Errors}}
     <p class="errors">Feeds that failed:</p>
     <ul class="errors">{{range .Digest.Errors}}<li>{{.}}</li>{{end}}</ul>

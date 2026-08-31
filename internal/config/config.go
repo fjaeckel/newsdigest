@@ -23,6 +23,45 @@ type Feed struct {
 // a tidy-up job rather than a startup failure.
 const DefaultCategory = "general"
 
+// How a category is briefed.
+//
+//   - ModeBrief is an edited selection: merge hard, rank by importance, and
+//     drop the tail once max_topics is reached. Right for a firehose you read
+//     for the gist — the day's news.
+//   - ModeComplete is a reading list: every article is accounted for, nothing
+//     is ever dropped for being minor, and there is no topic cap. Right for a
+//     subject you follow closely and would rather not have edited for you.
+const (
+	ModeBrief    = "brief"
+	ModeComplete = "complete"
+)
+
+// How a category's page is arranged under each day.
+const (
+	GroupByImportance = "importance" // the model's ranking, most important first
+	GroupByFeed       = "feed"       // one section per outlet, in config order
+)
+
+// Category is the per-category half of the config: how hard to edit, and how
+// to lay the result out.
+type Category struct {
+	Mode      string `yaml:"mode"`
+	GroupBy   string `yaml:"group_by"`
+	MaxTopics int    `yaml:"max_topics"` // 0 inherits the top-level budget
+}
+
+// Brief configures the cross-category front page — the handful of things worth
+// knowing before anything else, drawn from every subject rather than just the
+// news. One extra Claude call per run.
+type Brief struct {
+	Enabled  *bool `yaml:"enabled"`
+	MaxItems int   `yaml:"max_items"`
+}
+
+// On reports whether the front page brief should be generated. Absent means on:
+// it is the thing you open the app for.
+func (b Brief) On() bool { return b.Enabled == nil || *b.Enabled }
+
 // Exclude describes what never makes it into the brief. Topics are handed to
 // Claude verbatim; Keywords are a cheap local pre-filter applied first.
 type Exclude struct {
@@ -41,8 +80,14 @@ type Config struct {
 	Language        string  `yaml:"language"`
 	Model           string  `yaml:"model"`
 	Effort          string  `yaml:"effort"`
+	Brief           Brief   `yaml:"brief"`
 	Exclude         Exclude `yaml:"exclude"`
 	Feeds           []Feed  `yaml:"feeds"`
+
+	// Categories is keyed by category name. Load fills in an entry with
+	// defaults applied for every category the feeds actually use, so lookups
+	// downstream never have to think about what was left unset.
+	Categories map[string]Category `yaml:"categories"`
 
 	// Derived, not read from YAML.
 	Location *time.Location `yaml:"-"`
@@ -110,12 +155,79 @@ func Load(path string) (*Config, error) {
 		cfg.Exclude.Keywords[i] = strings.ToLower(strings.TrimSpace(k))
 	}
 
+	if cfg.Brief.MaxItems <= 0 {
+		cfg.Brief.MaxItems = 8
+	}
+
+	if err := cfg.resolveCategories(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 
-// Categories lists the distinct feed categories in the order they first appear
-// in the config, so the reader's own ordering is what shows up in the UI.
-func (c *Config) Categories() []string {
+// resolveCategories validates every `categories:` entry and gives each category
+// the feeds actually use a fully populated one, so nothing downstream has to
+// re-apply defaults.
+func (c *Config) resolveCategories() error {
+	resolved := make(map[string]Category, len(c.Categories))
+	for name, cat := range c.Categories {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			return fmt.Errorf("categories has an entry with no name")
+		}
+		filled, err := c.fill(cat)
+		if err != nil {
+			return fmt.Errorf("category %q: %w", key, err)
+		}
+		resolved[key] = filled
+	}
+
+	// A category with feeds but no entry of its own still gets one, so the
+	// `categories:` block stays optional.
+	for _, name := range c.CategoryNames() {
+		if _, ok := resolved[name]; !ok {
+			resolved[name], _ = c.fill(Category{})
+		}
+	}
+
+	c.Categories = resolved
+	return nil
+}
+
+// fill applies the defaults for the fields a category left unset. group_by
+// follows from mode: a complete category is a reading list, and reading lists
+// are read outlet by outlet.
+func (c *Config) fill(cat Category) (Category, error) {
+	switch cat.Mode {
+	case "":
+		cat.Mode = ModeBrief
+	case ModeBrief, ModeComplete:
+	default:
+		return cat, fmt.Errorf("mode must be %q or %q, got %q", ModeBrief, ModeComplete, cat.Mode)
+	}
+
+	switch cat.GroupBy {
+	case "":
+		if cat.Mode == ModeComplete {
+			cat.GroupBy = GroupByFeed
+		} else {
+			cat.GroupBy = GroupByImportance
+		}
+	case GroupByImportance, GroupByFeed:
+	default:
+		return cat, fmt.Errorf("group_by must be %q or %q, got %q", GroupByImportance, GroupByFeed, cat.GroupBy)
+	}
+
+	if cat.MaxTopics <= 0 {
+		cat.MaxTopics = c.MaxTopics
+	}
+	return cat, nil
+}
+
+// CategoryNames lists the distinct feed categories in the order they first
+// appear in the config, so the reader's own ordering is what shows up in the UI.
+func (c *Config) CategoryNames() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range c.Feeds {
@@ -124,6 +236,32 @@ func (c *Config) Categories() []string {
 		}
 		seen[f.Category] = true
 		out = append(out, f.Category)
+	}
+	return out
+}
+
+// CategoryOf returns the settings for a category, including ones that only
+// exist in stored digests because the config has since dropped their feeds.
+func (c *Config) CategoryOf(name string) Category {
+	if cat, ok := c.Categories[strings.ToLower(strings.TrimSpace(name))]; ok {
+		return cat
+	}
+	cat, _ := c.fill(Category{})
+	return cat
+}
+
+// FeedOrder maps an outlet name to its position in the config, so a category
+// grouped by feed reads in the order its feeds were written down rather than
+// in whatever order the day's stories happened to arrive.
+func (c *Config) FeedOrder(category string) map[string]int {
+	out := map[string]int{}
+	for _, f := range c.Feeds {
+		if f.Category != category {
+			continue
+		}
+		if _, seen := out[f.Name]; !seen {
+			out[f.Name] = len(out)
+		}
 	}
 	return out
 }
