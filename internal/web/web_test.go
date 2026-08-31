@@ -1086,6 +1086,153 @@ func TestFrontPageFailureKeepsTheCategories(t *testing.T) {
 	}
 }
 
+const briefResponse = `{"stories":[
+  {"lead":"America","text":"struck two rocket launchers near the strait.","topic_indexes":[0]}
+]}`
+
+// The backfill exists so a day that is only missing its front page doesn't cost
+// a whole re-run to fix: no feeds are fetched, no category is briefed again,
+// and every topic ID — and so every read mark — stays exactly as it was.
+func TestBackfillBriefWritesOnlyTheFrontPage(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	// Start from the state this is meant to repair: topics, no front page.
+	before, _ := hn.store.LoadDigest(hn.date)
+	before.Brief = nil
+	if err := hn.store.SaveDigest(before); err != nil {
+		t.Fatal(err)
+	}
+	if err := hn.store.SetRead(hn.date, before.Topics[0].ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &scriptedBackend{script: []string{briefResponse}}
+	gen := &digest.Generator{Cfg: hn.srv.Cfg, Store: hn.store, Backend: backend,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	d, err := gen.BackfillBrief(context.Background(), hn.date)
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	if backend.calls != 1 {
+		t.Errorf("want a single front page call, got %d", backend.calls)
+	}
+	if len(d.Brief) != 1 || d.Brief[0].Lead != "America" {
+		t.Fatalf("front page not written: %+v", d.Brief)
+	}
+	// It was written from the stored topics, not from the feed.
+	if !strings.Contains(backend.reqs[0].User, "New bridge approved") {
+		t.Error("backfill did not draw on the stored topics")
+	}
+	if !strings.Contains(backend.reqs[0].System, "front page") {
+		t.Error("backfill made something other than a front page call")
+	}
+
+	// The categories underneath are untouched, and so is the read mark.
+	if len(d.Topics) != len(before.Topics) || d.Topics[0].ID != before.Topics[0].ID {
+		t.Errorf("backfill disturbed the day's topics: %+v", d.Topics)
+	}
+	if !hn.store.ReadSet(hn.date)[before.Topics[0].ID] {
+		t.Error("backfill lost a read mark")
+	}
+}
+
+// A failed attempt has to leave a trace, or startup would try again on every
+// restart and pay for the call each time.
+func TestBackfillRecordsAFailedAttempt(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	d, _ := hn.store.LoadDigest(hn.date)
+	d.Brief = nil
+	hn.store.SaveDigest(d)
+
+	gen := &digest.Generator{Cfg: hn.srv.Cfg, Store: hn.store,
+		Backend: &scriptedBackend{script: []string{"not json at all"}},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if _, err := gen.BackfillBrief(context.Background(), hn.date); err == nil {
+		t.Fatal("a broken response came back as success")
+	}
+
+	stored, _ := hn.store.LoadDigest(hn.date)
+	if !digest.BriefAttempted(stored) {
+		t.Errorf("the failed attempt was not recorded: %v", stored.Errors)
+	}
+	if len(stored.Topics) == 0 {
+		t.Error("a failed front page took the day's topics with it")
+	}
+}
+
+// A call that completes but produces nothing is a result, not a gap, and has to
+// be recorded as one — otherwise the day looks untried and gets retried.
+func TestBackfillRecordsAnEmptyResult(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	d, _ := hn.store.LoadDigest(hn.date)
+	d.Brief = nil
+	hn.store.SaveDigest(d)
+
+	gen := &digest.Generator{Cfg: hn.srv.Cfg, Store: hn.store,
+		Backend: &scriptedBackend{script: []string{`{"stories":[]}`}},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if _, err := gen.BackfillBrief(context.Background(), hn.date); err != nil {
+		t.Fatalf("an empty result is not an error: %v", err)
+	}
+
+	stored, _ := hn.store.LoadDigest(hn.date)
+	if !digest.BriefAttempted(stored) {
+		t.Errorf("an empty front page left the day looking untried: %v", stored.Errors)
+	}
+}
+
+// A successful attempt clears the previous one's note, so Run details stops
+// reporting a failure that has since been repaired.
+func TestBackfillClearsAnEarlierFailure(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	d, _ := hn.store.LoadDigest(hn.date)
+	d.Brief = nil
+	d.Errors = []string{"road.cc: http 503", digest.BriefErrPrefix + "produced no stories"}
+	hn.store.SaveDigest(d)
+
+	gen := &digest.Generator{Cfg: hn.srv.Cfg, Store: hn.store,
+		Backend: &scriptedBackend{script: []string{briefResponse}},
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if _, err := gen.BackfillBrief(context.Background(), hn.date); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, _ := hn.store.LoadDigest(hn.date)
+	if digest.BriefAttempted(stored) {
+		t.Errorf("the repaired failure is still being reported: %v", stored.Errors)
+	}
+	// The unrelated feed failure is not collateral damage.
+	if len(stored.Errors) != 1 || stored.Errors[0] != "road.cc: http 503" {
+		t.Errorf("errors = %v, want the feed failure kept", stored.Errors)
+	}
+}
+
+// Nothing to write a front page from is a no-op, not an error or a wasted call.
+func TestBackfillOnAnEmptyDayDoesNothing(t *testing.T) {
+	hn := setup(t, goodResponse)
+
+	saveDay(t, hn.store, "2026-08-20") // a day that ran and found nothing
+
+	backend := &scriptedBackend{script: []string{briefResponse}}
+	gen := &digest.Generator{Cfg: hn.srv.Cfg, Store: hn.store, Backend: backend,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if _, err := gen.BackfillBrief(context.Background(), "2026-08-20"); err != nil {
+		t.Fatalf("backfill on an empty day: %v", err)
+	}
+	if backend.calls != 0 {
+		t.Errorf("want no call for a day with no topics, got %d", backend.calls)
+	}
+}
+
 func TestExtractJSONTolerance(t *testing.T) {
 	cases := map[string]string{
 		"plain":        `{"topics":[]}`,

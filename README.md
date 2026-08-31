@@ -238,7 +238,9 @@ The front page is written from the finished topics, never from the raw feed, so
 it can't report anything a category didn't. Each paragraph cites the topics it
 drew on, which is how the page shows real outlet chips under prose the model
 wrote. If the call fails, you lose the front page and keep the morning: the
-failure is listed under **Run details** and the categories are untouched.
+failure is listed under **Run details** and the categories are untouched — and
+because it's written from stored topics, the next restart can repair it with a
+single call rather than a full re-run.
 
 A feed that's down shows up under **Run details** at the bottom of the page
 instead of silently shrinking your brief. A category whose brief fails costs
@@ -257,6 +259,18 @@ and headline, so regenerating a day keeps your read marks intact.
 - Today already has topics → never regenerated, however uneven the categories
   are. A quiet category is normal, and treating one as a gap to fill would
   re-run the model on every restart.
+
+There's one exception to that last rule, and it's narrow on purpose. If the day
+has topics but no **front page** — it was briefed before the front page existed,
+or that one call failed — startup writes just the front page. No feeds are
+fetched and no category is briefed again, because the front page is written from
+stored topics anyway: one Claude call rather than one per category, and since no
+topic is rebuilt, no read mark moves.
+
+A front page call that completes but produces nothing is recorded as such, not
+left blank, so a day that has genuinely been tried isn't tried again on every
+restart. Those retries wait for `run_at`, like an empty morning does; a day that
+has simply never been asked is written immediately.
 
 ## Data on disk
 

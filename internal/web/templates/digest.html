@@ -52,8 +52,10 @@
       {{end}}
     </ul>
     {{end}}
+    {{/* Not just feeds any more: a category whose brief failed and a front page
+         that didn't come out are listed here too. */}}
     {{if .Digest.Errors}}
-    <p class="errors">Feeds that failed:</p>
+    <p class="errors">What went wrong:</p>
     <ul class="errors">{{range .Digest.Errors}}<li>{{.}}</li>{{end}}</ul>
     {{end}}
   </details>

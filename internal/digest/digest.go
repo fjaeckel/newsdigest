@@ -155,11 +155,10 @@ func (g *Generator) Run(ctx context.Context, date string) (*store.Digest, error)
 			// The categories are the substance; losing the front page costs a
 			// nice-to-have, not the morning.
 			g.Log.Error("front page brief failed", "err", err)
-			d.Errors = append(d.Errors, fmt.Sprintf("front page: %v", err))
 		} else {
 			g.Log.Info("front page briefed", "stories", len(brief))
-			d.Brief = brief
 		}
+		noteBrief(d, brief, err)
 	}
 
 	d.Stats.Topics = len(d.Topics)
@@ -450,6 +449,86 @@ func userPrompt(items []feeds.Item, loc *time.Location, mode string) string {
 }
 
 // --- the front page ---
+
+// BriefErrPrefix marks a digest error as being about the front page rather
+// than a feed or a category. Startup reads it to tell a day that never had a
+// front page written from one whose front page was attempted and did not work,
+// which are worth treating differently.
+const BriefErrPrefix = "front page: "
+
+// BackfillBrief writes the front page for a day that already has topics but no
+// front page — one briefed before the front page existed, or one whose front
+// page call failed.
+//
+// It is deliberately not a re-run: the front page is written from stored
+// topics, so nothing has to be fetched and no category has to be briefed
+// again. One Claude call instead of one per category, and because no topic is
+// rebuilt, no topic ID changes and no read mark moves.
+func (g *Generator) BackfillBrief(ctx context.Context, date string) (*store.Digest, error) {
+	d, err := g.Store.LoadDigest(date)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || len(d.Topics) == 0 {
+		return d, nil // nothing to write a front page from
+	}
+
+	brief, err := g.frontBrief(ctx, d.Topics)
+	if err != nil {
+		g.Log.Error("front page backfill failed", "date", date, "err", err)
+	} else {
+		g.Log.Info("front page backfilled", "date", date, "stories", len(brief))
+	}
+
+	// Saved either way: on failure the note is the point, since it is what
+	// stops the next restart from paying for the same call again.
+	noteBrief(d, brief, err)
+	if saveErr := g.Store.SaveDigest(d); saveErr != nil {
+		return nil, saveErr
+	}
+	return d, err
+}
+
+// noteBrief folds one front page attempt into the digest. An attempt that
+// produced no stories is recorded like a failure rather than left silent: it
+// is a completed call, and a day that looks like it was never tried would be
+// tried again on every restart.
+func noteBrief(d *store.Digest, brief []store.BriefStory, err error) {
+	// The previous attempt's note goes either way — on success it is no longer
+	// true, and on failure it is replaced by this attempt's.
+	d.Errors = withoutBriefError(d.Errors)
+
+	switch {
+	case err != nil:
+		d.Errors = append(d.Errors, BriefErrPrefix+err.Error())
+	case len(brief) == 0:
+		d.Errors = append(d.Errors, BriefErrPrefix+"produced no stories")
+	default:
+		d.Brief = brief
+	}
+}
+
+func withoutBriefError(errs []string) []string {
+	var out []string
+	for _, e := range errs {
+		if !strings.HasPrefix(e, BriefErrPrefix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// BriefAttempted reports whether a front page call has already been made for
+// this day and did not produce one. A day with neither a front page nor such a
+// note has simply never been asked.
+func BriefAttempted(d *store.Digest) bool {
+	for _, e := range d.Errors {
+		if strings.HasPrefix(e, BriefErrPrefix) {
+			return true
+		}
+	}
+	return false
+}
 
 type modelBrief struct {
 	Stories []struct {

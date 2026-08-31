@@ -169,17 +169,71 @@ func ensureToday(ctx context.Context, log *slog.Logger, cfg *config.Config, st *
 		return
 	}
 
-	generate, reason := shouldBriefOnStartup(existing, now, cfg.RunAtToday(now))
-	if !generate {
-		log.Info("startup: leaving today alone", "date", today, "reason", reason)
+	runAt := cfg.RunAtToday(now)
+
+	generate, reason := shouldBriefOnStartup(existing, now, runAt)
+	if generate {
+		log.Info("startup: briefing today", "date", today, "reason", reason)
+
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+		defer cancel()
+		if _, err := gen.Run(ctx, today); err != nil {
+			log.Error("startup digest failed", "date", today, "err", err)
+		}
 		return
 	}
-	log.Info("startup: briefing today", "date", today, "reason", reason)
+	log.Info("startup: leaving today alone", "date", today, "reason", reason)
+
+	// A full run isn't warranted, but the day can still be missing its front
+	// page — briefed before the front page existed, or briefed on a morning
+	// when that one call failed. Writing it needs no feeds and no category
+	// briefs, so it is worth doing on its own rather than waiting for tomorrow.
+	backfill, reason := shouldBackfillBrief(existing, cfg.Brief.On(), now, runAt)
+	if !backfill {
+		log.Info("startup: not writing a front page", "date", today, "reason", reason)
+		return
+	}
+	log.Info("startup: writing today's front page on its own", "date", today, "reason", reason)
 
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
-	if _, err := gen.Run(ctx, today); err != nil {
-		log.Error("startup digest failed", "date", today, "err", err)
+	if _, err := gen.BackfillBrief(ctx, today); err != nil {
+		log.Error("startup front page failed", "date", today, "err", err)
+	}
+}
+
+// shouldBackfillBrief decides whether today needs its front page written on its
+// own. It only ever fires for a day that already has topics, so it can never be
+// the thing that briefs a morning — at worst it adds a page that was missing.
+//
+// The clock matters in exactly one case. A day that has simply never been asked
+// for a front page has no failure to retry, so it is written immediately. A day
+// whose front page call already ran and came back with nothing is a completed
+// attempt, and retrying that on every restart would spend a call each time, so
+// it waits for run_at the way an empty morning does.
+func shouldBackfillBrief(existing *store.Digest, briefOn bool, now, runAt time.Time) (bool, string) {
+	// A day that is about to be rebuilt in full gets its front page out of that
+	// run, so backfilling as well would buy the same page twice. The caller
+	// already returns before reaching here, but the two decisions being
+	// genuinely disjoint is a property of the decisions, not of the order two
+	// statements happen to sit in.
+	if full, _ := shouldBriefOnStartup(existing, now, runAt); full {
+		return false, "a full brief is running instead"
+	}
+
+	switch {
+	case !briefOn:
+		return false, "front page switched off in config"
+	case existing == nil || len(existing.Topics) == 0:
+		return false, "no topics to write a front page from"
+	case len(existing.Brief) > 0:
+		return false, "already has a front page"
+	case !digest.BriefAttempted(existing):
+		return true, "day has no front page yet"
+	case now.Before(runAt):
+		return false, "front page already failed today, before run_at"
+	default:
+		return true, "front page already failed today, run_at has passed"
 	}
 }
 
